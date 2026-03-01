@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: mortgage-mcp
+    runtime: docker
+    plan: starter
+    envVars:
+      - key: GOOGLE_CLOUD_PROJECT
+        sync: false
+      - key: GOOGLE_CLOUD_LOCATION
+        value: northamerica-northeast1
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false
+      - key: MCP_AUTH_TOKEN
+        generateValue: true
+      - key: PORT
+        value: "8000"

@@ -1,0 +1,149 @@
+"""Vertex AI Gemini integration for bank statement extraction."""
+
+from google import genai
+from google.genai import types
+
+from mortgage_mcp.config import settings
+from mortgage_mcp.models.bank_statement import BankStatementExtraction
+from mortgage_mcp.services.document_parser import ParsedDocument
+
+EXTRACTION_PROMPT = """\
+Tu es un analyste financier spécialisé dans l'évaluation de revenus de travailleurs autonomes pour des demandes de prêt hypothécaire au Québec.
+
+Analyse les relevés bancaires fournis et extrais les informations suivantes de façon exhaustive et précise:
+
+1. **Informations du compte**: Titulaire, institution financière, numéro de compte (derniers 4 chiffres), période couverte.
+
+2. **Dépôts**: Pour CHAQUE dépôt, identifie:
+   - La date exacte
+   - La description complète
+   - Le montant
+   - La catégorie:
+     * `business_income`: Revenus d'entreprise, paiements de clients, virements Interac de clients, honoraires professionnels, revenus de contrats
+     * `personal_transfer`: Transferts personnels entre comptes, virements d'un conjoint/famille
+     * `government`: Crédits TPS/TVH, remboursements d'impôt, prestations gouvernementales
+     * `loan_credit`: Prêts, marges de crédit, avances
+     * `refund`: Remboursements de fournisseurs, retours
+     * `other`: Tout autre dépôt non classifiable
+
+3. **Retraits**: Pour CHAQUE retrait significatif, identifie la date, description, montant et catégorie de dépense.
+
+4. **Ventilation mensuelle**: Pour chaque mois, calcule les totaux par catégorie de dépôt et le total des retraits.
+
+5. **Totaux**: Calcule le revenu d'affaires total, le revenu mensuel moyen, et le revenu annualisé (moyenne × 12).
+
+6. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
+   - Dépôts inhabituellement élevés
+   - Revenus irréguliers
+   - Transferts ambigus entre revenus et transferts personnels
+   - Périodes sans activité
+   - Qualité des documents (illisible, pages manquantes, etc.)
+
+IMPORTANT:
+- Tous les montants en dollars canadiens (CAD)
+- Les dates en format YYYY-MM-DD
+- Les mois en format YYYY-MM
+- Sois conservateur: en cas de doute sur la catégorie d'un dépôt, classe-le comme `other` et ajoute une note
+- Un travailleur autonome typique reçoit des paiements de clients variés par virement, chèque ou Interac
+"""
+
+
+def _build_contents(
+    documents: list[ParsedDocument],
+    borrower_name: str | None = None,
+    business_name: str | None = None,
+    business_type: str | None = None,
+) -> list[types.Content]:
+    """Build the multimodal content list for Gemini."""
+    parts: list[types.Part] = []
+
+    # Add context if provided
+    context_lines = []
+    if borrower_name:
+        context_lines.append(f"Nom de l'emprunteur: {borrower_name}")
+    if business_name:
+        context_lines.append(f"Nom de l'entreprise: {business_name}")
+    if business_type:
+        context_lines.append(f"Type d'entreprise: {business_type}")
+
+    if context_lines:
+        parts.append(types.Part.from_text(
+            text="Contexte:\n" + "\n".join(context_lines) + "\n"
+        ))
+
+    parts.append(types.Part.from_text(text=EXTRACTION_PROMPT))
+
+    # Add each document as a binary part
+    for doc in documents:
+        parts.append(types.Part.from_bytes(data=doc.data, mime_type=doc.mime_type))
+
+    return [types.Content(role="user", parts=parts)]
+
+
+async def extract_bank_statements(
+    documents: list[ParsedDocument],
+    borrower_name: str | None = None,
+    business_name: str | None = None,
+    business_type: str | None = None,
+) -> BankStatementExtraction:
+    """Send documents to Gemini and get structured extraction.
+
+    Returns:
+        BankStatementExtraction with all extracted data.
+    """
+    settings.setup_gcp_credentials()
+
+    client = genai.Client(
+        vertexai=True,
+        project=settings.google_cloud_project,
+        location=settings.google_cloud_location,
+    )
+
+    contents = _build_contents(
+        documents, borrower_name, business_name, business_type
+    )
+
+    response = await client.aio.models.generate_content(
+        model=settings.gemini_model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=BankStatementExtraction,
+            temperature=0.1,
+        ),
+    )
+
+    return BankStatementExtraction.model_validate_json(response.text)
+
+
+async def check_vertex_ai_connection() -> dict:
+    """Verify connectivity to Vertex AI. Returns status dict."""
+    settings.setup_gcp_credentials()
+
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=settings.google_cloud_project,
+            location=settings.google_cloud_location,
+        )
+        response = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents="Réponds uniquement: OK",
+            config=types.GenerateContentConfig(
+                max_output_tokens=10,
+                temperature=0.0,
+            ),
+        )
+        return {
+            "status": "connected",
+            "model": settings.gemini_model,
+            "location": settings.google_cloud_location,
+            "response": response.text.strip(),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "model": settings.gemini_model,
+            "location": settings.google_cloud_location,
+            "error": str(exc),
+        }
