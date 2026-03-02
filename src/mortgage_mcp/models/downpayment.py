@@ -88,6 +88,9 @@ class FlagType(str, Enum):
     ROUND_AMOUNT = "round_amount"
     RAPID_SUCCESSION = "rapid_succession"
     UNEXPLAINED_SOURCE = "unexplained_source"
+    CRYPTO_SOURCE = "crypto_source"
+    FOREIGN_CURRENCY = "foreign_currency"
+    DOCUMENT_INCOMPLETE = "document_incomplete"
 
 
 class TransferMatch(BaseModel):

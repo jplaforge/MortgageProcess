@@ -1,9 +1,9 @@
 """Generate the Excel downpayment audit report from analysis results.
 
 Produces a 3-sheet workbook designed for mortgage brokers:
-1. Résumé — verdict, key numbers, accounts, sources, transfers, flags
+1. Résumé — verdict, key numbers, accounts, sources, zone de saisie, transfers, flags, legend
 2. Demandes au client — actionable document requests
-3. Détail — flagged transactions needing verification
+3. Détail — flagged transactions needing verification (with broker input columns)
 """
 
 import base64
@@ -35,6 +35,17 @@ THIN_BORDER = Border(
     top=Side(style="thin"),
     bottom=Side(style="thin"),
 )
+
+# Section header: light blue background, dark-blue bold text
+SECTION_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+SECTION_FONT = Font(bold=True, size=11, color="1F4E79")
+
+# Alternating row fill for tables
+ALT_ROW_FILL = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+
+# Broker input cells: pale yellow background, grey italic placeholder text
+INPUT_FILL = PatternFill(start_color="FFFDE7", end_color="FFFDE7", fill_type="solid")
+INPUT_FONT = Font(color="9E9E9E", italic=True)
 
 SEVERITY_FILLS = {
     FlagSeverity.CRITICAL: PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
@@ -74,6 +85,9 @@ FLAG_TYPE_LABELS: dict[FlagType, str] = {
     FlagType.ROUND_AMOUNT: "Montant rond",
     FlagType.RAPID_SUCCESSION: "Succession rapide",
     FlagType.UNEXPLAINED_SOURCE: "Source inexpliquée",
+    FlagType.CRYPTO_SOURCE: "Source crypto-monnaie",
+    FlagType.FOREIGN_CURRENCY: "Devise étrangère",
+    FlagType.DOCUMENT_INCOMPLETE: "Document incomplet",
 }
 
 SEVERITY_LABELS: dict[FlagSeverity, str] = {
@@ -103,6 +117,12 @@ MONTH_NAMES_FR = {
 }
 
 _SEVERITY_ORDER = {FlagSeverity.CRITICAL: 0, FlagSeverity.WARNING: 1, FlagSeverity.INFO: 2}
+
+# Flag types that require broker input in the zone de saisie
+_ZONE_FLAG_TYPES = {
+    FlagType.LARGE_DEPOSIT, FlagType.UNEXPLAINED_SOURCE, FlagType.CASH_DEPOSIT,
+    FlagType.CRYPTO_SOURCE, FlagType.FOREIGN_CURRENCY, FlagType.DOCUMENT_INCOMPLETE,
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -156,9 +176,12 @@ def _build_tx_lookup(
     return lookup
 
 
-def _section_header(ws, row: int, title: str) -> int:
-    """Write a section header and return the next row."""
-    ws.cell(row=row, column=1, value=title).font = Font(bold=True, size=12)
+def _section_header(ws, row: int, title: str, max_col: int = 6) -> int:
+    """Write a styled section header and return the next row."""
+    for col in range(1, max_col + 1):
+        ws.cell(row=row, column=col).fill = SECTION_FILL
+    cell = ws.cell(row=row, column=1, value=title)
+    cell.font = SECTION_FONT
     return row + 1
 
 
@@ -177,7 +200,7 @@ def _all_transfer_tx_ids(result: DPAuditResult) -> set[str]:
 
 
 def _fill_resume(ws, result: DPAuditResult) -> None:
-    """Fill the Résumé sheet: verdict, key numbers, accounts, sources, transfers, flags."""
+    """Fill the Résumé sheet."""
     acct_lookup = _build_account_lookup(result.accounts)
     summary = result.summary
 
@@ -245,7 +268,7 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         _apply_header_style(ws, row, len(acct_headers))
         row += 1
 
-        for acct in result.accounts:
+        for i, acct in enumerate(result.accounts):
             period = ""
             if acct.period_start and acct.period_end:
                 period = f"{_format_date_short(acct.period_start)} — {_format_date_short(acct.period_end)}"
@@ -255,11 +278,14 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
                 period,
                 acct.opening_balance, acct.closing_balance,
             ]
+            alt_fill = ALT_ROW_FILL if i % 2 == 1 else None
             for col, val in enumerate(row_data, 1):
                 cell = ws.cell(row=row, column=col, value=val)
                 cell.border = THIN_BORDER
                 if col in (5, 6):
                     cell.number_format = CURRENCY_FORMAT
+                if alt_fill:
+                    cell.fill = alt_fill
             row += 1
         row += 1
 
@@ -287,6 +313,50 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         row += 1
     row += 1
 
+    # ── Zone de saisie (broker input for WARNING+/CRITICAL flags) ──
+    zone_flags = [
+        f for f in result.flags
+        if f.type in _ZONE_FLAG_TYPES and f.severity != FlagSeverity.INFO
+    ]
+    if zone_flags:
+        row = _section_header(ws, row, "Zone de saisie — Sources à identifier par le courtier")
+        zone_headers = ["Transaction", "Montant", "Source identifiée (courtier)", "Document reçu ✓", "Notes"]
+        for col, h in enumerate(zone_headers, 1):
+            ws.cell(row=row, column=col, value=h)
+        _apply_header_style(ws, row, len(zone_headers))
+        row += 1
+
+        tx_by_id = {t.id: t for t in result.transactions}
+        for flag in zone_flags:
+            tx_label = FLAG_TYPE_LABELS.get(flag.type, flag.type.value)
+            tx_amount: float | None = None
+            if flag.supporting_transaction_ids:
+                first_tx = tx_by_id.get(flag.supporting_transaction_ids[0])
+                if first_tx:
+                    tx_amount = first_tx.amount
+                    desc = first_tx.description[:40]
+                    tx_label = f"{desc} ({_format_date_short(first_tx.date)})"
+
+            # A: Transaction (read-only)
+            cell_a = ws.cell(row=row, column=1, value=tx_label)
+            cell_a.border = THIN_BORDER
+
+            # B: Montant (read-only)
+            cell_b = ws.cell(row=row, column=2, value=tx_amount)
+            cell_b.border = THIN_BORDER
+            if tx_amount is not None:
+                cell_b.number_format = CURRENCY_FORMAT
+
+            # C-E: Broker input columns
+            placeholders = ["À compléter...", "Non", ""]
+            for col_idx, placeholder in enumerate(placeholders, start=3):
+                cell = ws.cell(row=row, column=col_idx, value=placeholder or None)
+                cell.fill = INPUT_FILL
+                cell.font = INPUT_FONT
+                cell.border = THIN_BORDER
+            row += 1
+        row += 1
+
     # ── Transfers (inline, only if any) ──
     if result.transfers:
         row = _section_header(ws, row, "Transferts inter-comptes détectés")
@@ -296,7 +366,7 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         _apply_header_style(ws, row, len(tf_headers))
         row += 1
 
-        for tm in result.transfers:
+        for i, tm in enumerate(result.transfers):
             from_label = acct_lookup.get(tm.from_account_id, tm.from_account_id)
             to_label = acct_lookup.get(tm.to_account_id, tm.to_account_id)
             if tm.is_split:
@@ -305,11 +375,14 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
                 detail = f"Délai: {tm.date_delta_days} jour(s)"
             else:
                 detail = "Même jour"
+            alt_fill = ALT_ROW_FILL if i % 2 == 1 else None
             for col, val in enumerate([from_label, to_label, tm.amount, detail], 1):
                 cell = ws.cell(row=row, column=col, value=val)
                 cell.border = THIN_BORDER
                 if col == 3:
                     cell.number_format = CURRENCY_FORMAT
+                if alt_fill:
+                    cell.fill = alt_fill
             row += 1
         row += 1
 
@@ -336,13 +409,22 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         row += 1
 
         sorted_flags = sorted(result.flags, key=lambda f: _SEVERITY_ORDER.get(f.severity, 3))
-        for flag in sorted_flags:
-            ws.cell(row=row, column=1, value=FLAG_TYPE_LABELS.get(flag.type, flag.type.value)).border = THIN_BORDER
+        for i, flag in enumerate(sorted_flags):
+            alt_fill = ALT_ROW_FILL if i % 2 == 1 else None
+            type_cell = ws.cell(row=row, column=1, value=FLAG_TYPE_LABELS.get(flag.type, flag.type.value))
+            type_cell.border = THIN_BORDER
+            if alt_fill:
+                type_cell.fill = alt_fill
+
             sev_cell = ws.cell(row=row, column=2, value=SEVERITY_LABELS.get(flag.severity, flag.severity.value))
             sev_cell.border = THIN_BORDER
             sev_cell.fill = SEVERITY_FILLS.get(flag.severity, PatternFill())
             sev_cell.font = SEVERITY_FONTS.get(flag.severity, Font())
-            ws.cell(row=row, column=3, value=flag.rationale).border = THIN_BORDER
+
+            rat_cell = ws.cell(row=row, column=3, value=flag.rationale)
+            rat_cell.border = THIN_BORDER
+            if alt_fill:
+                rat_cell.fill = alt_fill
             row += 1
         row += 1
 
@@ -352,7 +434,27 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         for note in summary.review_notes:
             ws.cell(row=row, column=1, value=f"• {note}")
             row += 1
+        row += 1
 
+    # ── Legend ──
+    row = _section_header(ws, row, "Légende des couleurs", max_col=3)
+    legend_items = [
+        ("Critique", SEVERITY_FILLS[FlagSeverity.CRITICAL], SEVERITY_FONTS[FlagSeverity.CRITICAL], "Action immédiate requise"),
+        ("Avertissement", SEVERITY_FILLS[FlagSeverity.WARNING], SEVERITY_FONTS[FlagSeverity.WARNING], "Vérification requise"),
+        ("Information", SEVERITY_FILLS[FlagSeverity.INFO], SEVERITY_FONTS[FlagSeverity.INFO], "Pour information seulement"),
+        ("Zone de saisie", INPUT_FILL, INPUT_FONT, "À compléter par le courtier"),
+    ]
+    for label, fill, font, desc in legend_items:
+        cell_a = ws.cell(row=row, column=1, value=label)
+        cell_a.fill = fill
+        cell_a.font = font
+        cell_a.border = THIN_BORDER
+        cell_b = ws.cell(row=row, column=2, value=desc)
+        cell_b.border = THIN_BORDER
+        row += 1
+
+    # Frozen pane: keep title row visible while scrolling
+    ws.freeze_panes = "A2"
     _set_col_widths(ws, {"A": 35, "B": 30, "C": 25, "D": 20, "E": 18, "F": 18})
 
 
@@ -380,7 +482,11 @@ def _fill_demandes(ws, result: DPAuditResult) -> None:
     row += 2
 
     for i, req in enumerate(result.client_requests, 1):
-        ws.cell(row=row, column=1, value=f"{i}. {req.title}").font = Font(bold=True, size=12)
+        # Numbered card header — section styling
+        for col in range(1, 3):
+            ws.cell(row=row, column=col).fill = SECTION_FILL
+        title_cell = ws.cell(row=row, column=1, value=f"{i}. {req.title}")
+        title_cell.font = SECTION_FONT
         row += 1
 
         ws.cell(row=row, column=1, value="Raison:").font = HEADER_FONT
@@ -389,7 +495,7 @@ def _fill_demandes(ws, result: DPAuditResult) -> None:
 
         ws.cell(row=row, column=1, value="Documents requis:").font = HEADER_FONT
         for doc in req.required_docs:
-            ws.cell(row=row, column=2, value=f"• {doc}")
+            ws.cell(row=row, column=2, value=f"☐ {doc}")
             row += 1
 
         if req.supporting_transaction_ids:
@@ -412,6 +518,7 @@ def _fill_detail(ws, result: DPAuditResult) -> None:
 
     Only includes WARNING+ flagged transactions and large unflagged deposits.
     INFO-only flags (like non_payroll_recurring) are excluded to reduce noise.
+    Columns G-H are broker input zones.
     """
     acct_lookup = _build_account_lookup(result.accounts)
 
@@ -454,13 +561,17 @@ def _fill_detail(ws, result: DPAuditResult) -> None:
         _set_col_widths(ws, {"A": 50})
         return
 
-    headers = ["Date", "Compte", "Description", "Montant", "Catégorie", "Drapeaux"]
+    headers = ["Date", "Compte", "Description", "Montant", "Catégorie", "Drapeaux",
+               "Explication du courtier", "Document reçu ✓"]
     for col, h in enumerate(headers, 1):
         ws.cell(row=row, column=col, value=h)
     _apply_header_style(ws, row, len(headers))
     row += 1
 
-    for txn in key_txns:
+    # Freeze pane after header row
+    ws.freeze_panes = "A4"
+
+    for i, txn in enumerate(key_txns):
         acct_label = acct_lookup.get(txn.account_id, txn.account_id)
         flag_info = flagged_ids.get(txn.id, [])
         flag_text = ", ".join(label for label, _ in flag_info) if flag_info else ""
@@ -480,17 +591,37 @@ def _fill_detail(ws, result: DPAuditResult) -> None:
             CATEGORY_LABELS.get(txn.category, txn.category.value),
             flag_text,
         ]
+
+        alt_fill = ALT_ROW_FILL if i % 2 == 1 else None
+
         for col, val in enumerate(row_data, 1):
             cell = ws.cell(row=row, column=col, value=val)
             cell.border = THIN_BORDER
             if col == 4:
                 cell.number_format = CURRENCY_FORMAT
-            if col == 6 and highest_sev:
+            # Severity fill covers full row A-F; alternating fill only when no flag
+            if highest_sev:
                 cell.fill = SEVERITY_FILLS.get(highest_sev, PatternFill())
-                cell.font = SEVERITY_FONTS.get(highest_sev, Font())
+                if col == 6:
+                    cell.font = SEVERITY_FONTS.get(highest_sev, Font())
+            elif alt_fill:
+                cell.fill = alt_fill
+
+        # G: Broker explanation (input)
+        cell_g = ws.cell(row=row, column=7, value="Indiquer la source...")
+        cell_g.fill = INPUT_FILL
+        cell_g.font = INPUT_FONT
+        cell_g.border = THIN_BORDER
+
+        # H: Document received (input)
+        cell_h = ws.cell(row=row, column=8, value="Non")
+        cell_h.fill = INPUT_FILL
+        cell_h.font = INPUT_FONT
+        cell_h.border = THIN_BORDER
+
         row += 1
 
-    _set_col_widths(ws, {"A": 18, "B": 28, "C": 45, "D": 16, "E": 18, "F": 30})
+    _set_col_widths(ws, {"A": 18, "B": 28, "C": 45, "D": 16, "E": 18, "F": 30, "G": 35, "H": 18})
 
 
 # ── Public API ────────────────────────────────────────────────────────────

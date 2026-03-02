@@ -205,11 +205,14 @@ class TestDetailSheet:
         wb = load_workbook(io.BytesIO(generate_dp_excel(dp_audit_result)))
         ws = wb["Détail"]
         # Header row is row 3 (after title + blank)
-        headers = [ws.cell(3, c).value for c in range(1, 7)]
+        headers = [ws.cell(3, c).value for c in range(1, 9)]
         assert "Date" in headers
         assert "Compte" in headers
         assert "Catégorie" in headers
         assert "Drapeaux" in headers
+        # New broker input columns
+        assert "Explication du courtier" in headers
+        assert "Document reçu ✓" in headers
 
     def test_institution_names_instead_of_ids(self, dp_audit_result):
         """Account column should show institution names, not raw IDs like 'A1'."""
@@ -291,6 +294,72 @@ class TestDetailSheet:
         data = generate_dp_excel(result)
         wb = load_workbook(io.BytesIO(data))
         assert len(wb.sheetnames) == 3
+
+
+class TestNewFlagLabels:
+    def test_new_flag_types_have_french_labels(self):
+        from mortgage_mcp.models.downpayment import FlagType
+        assert FlagType.CRYPTO_SOURCE in FLAG_TYPE_LABELS
+        assert FLAG_TYPE_LABELS[FlagType.CRYPTO_SOURCE] == "Source crypto-monnaie"
+        assert FlagType.FOREIGN_CURRENCY in FLAG_TYPE_LABELS
+        assert FLAG_TYPE_LABELS[FlagType.FOREIGN_CURRENCY] == "Devise étrangère"
+        assert FlagType.DOCUMENT_INCOMPLETE in FLAG_TYPE_LABELS
+        assert FLAG_TYPE_LABELS[FlagType.DOCUMENT_INCOMPLETE] == "Document incomplet"
+
+    def test_zone_de_saisie_present_when_flags_exist(self, dp_audit_result):
+        """Zone de saisie section appears on Résumé when WARNING+ flags exist."""
+        wb = load_workbook(io.BytesIO(generate_dp_excel(dp_audit_result)))
+        ws = wb["Résumé"]
+        all_vals = [ws.cell(r, 1).value for r in range(1, 80)]
+        assert any(v and "Zone de saisie" in str(v) for v in all_vals)
+
+    def test_zone_de_saisie_section_absent_when_no_flags(self):
+        """Zone de saisie input section should not appear when there are no WARNING+ flags.
+        (The legend row mentioning 'Zone de saisie' is always present.)
+        """
+        from mortgage_mcp.models.downpayment import DPSummary, SourceBreakdown
+        result = DPAuditResult(
+            summary=DPSummary(dp_target=50000, source_breakdown=SourceBreakdown()),
+            borrower_name="Test",
+        )
+        wb = load_workbook(io.BytesIO(generate_dp_excel(result)))
+        ws = wb["Résumé"]
+        all_vals = [ws.cell(r, 1).value for r in range(1, 60)]
+        # The input section header contains "Sources à identifier" — only present when flags exist
+        assert not any(v and "Sources à identifier" in str(v) for v in all_vals)
+
+    def test_legend_present(self, dp_audit_result):
+        """Légende section always appears at bottom of Résumé."""
+        wb = load_workbook(io.BytesIO(generate_dp_excel(dp_audit_result)))
+        ws = wb["Résumé"]
+        all_vals = [ws.cell(r, 1).value for r in range(1, 80)]
+        assert any(v and "Légende" in str(v) for v in all_vals)
+
+    def test_detail_broker_input_columns(self, dp_audit_result):
+        """Columns G and H of Détail sheet should have broker input placeholders."""
+        wb = load_workbook(io.BytesIO(generate_dp_excel(dp_audit_result)))
+        ws = wb["Détail"]
+        # At least one data row should have input placeholders in G and H
+        found_input = False
+        for r in range(4, 20):
+            g_val = ws.cell(r, 7).value
+            h_val = ws.cell(r, 8).value
+            if g_val or h_val:
+                found_input = True
+                break
+        assert found_input
+
+    def test_demandes_checkbox_prefix(self, dp_audit_result):
+        """Required documents in Demandes sheet should have ☐ checkbox prefix."""
+        wb = load_workbook(io.BytesIO(generate_dp_excel(dp_audit_result)))
+        ws = wb["Demandes au client"]
+        all_vals = []
+        for r in range(1, 30):
+            v = ws.cell(r, 2).value
+            if v:
+                all_vals.append(str(v))
+        # Should have at least one checkbox-prefixed item
+        assert any("☐" in v for v in all_vals)
 
 
 class TestDateFormatting:

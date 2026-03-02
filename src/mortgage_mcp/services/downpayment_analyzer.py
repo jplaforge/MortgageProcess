@@ -35,6 +35,16 @@ LARGE_DEPOSIT_ABS_THRESHOLD = 5_000
 LARGE_DEPOSIT_RELATIVE_FACTOR = 0.25  # 25% of monthly average
 CASH_KEYWORDS = {"CASH", "COMPTANT", "GUICHET", "ATM", "DEPOT ESPECES", "ESPECES", "DEPOT COMPTANT"}
 TRANSFER_KEYWORDS = {"VIREMENT", "TRANSFERT", "INTERAC", "TFR", "TRANSFER", "VIR"}
+CRYPTO_KEYWORDS = {
+    "CRYPTO", "BITCOIN", "BTC", "ETH", "ETHEREUM",
+    "COINBASE", "NEWTON", "NDAX", "SHAKEPAY", "BINANCE",
+    "KRAKEN", "CRYPTO EXCHANGE",
+}
+FX_KEYWORDS = {
+    "WIRE IN", "SWIFT", "FOREIGN WIRE", "INTERNATIONAL WIRE",
+    "WIRE TRANSFER", "USD", "US DOLLAR", "DEVISE ETRANGERE",
+    "FOREIGN CURRENCY",
+}
 ROUND_AMOUNTS = {5_000, 10_000, 25_000, 50_000, 100_000}
 RAPID_SUCCESSION_THRESHOLD = 3_000
 RAPID_SUCCESSION_HOURS = 48
@@ -215,6 +225,44 @@ def match_transfers(transactions: list[DPTransaction]) -> list[TransferMatch]:
 # ── 2. Flag detection ────────────────────────────────────────────────────
 
 
+def _detect_document_gaps(
+    accounts: list[DPAccountInfo],
+    transactions: list[DPTransaction],
+) -> list[DPFlag]:
+    """Detect missing pages by comparing computed vs stated closing balance."""
+    flags: list[DPFlag] = []
+    for acct in accounts:
+        if acct.opening_balance == 0 and acct.closing_balance == 0:
+            continue
+        deposits_total = sum(
+            t.amount for t in transactions
+            if t.account_id == acct.account_id and t.type == TransactionType.DEPOSIT
+        )
+        withdrawals_total = sum(
+            t.amount for t in transactions
+            if t.account_id == acct.account_id and t.type == TransactionType.WITHDRAWAL
+        )
+        expected_closing = acct.opening_balance + deposits_total - withdrawals_total
+        diff = abs(expected_closing - acct.closing_balance)
+        threshold = max(1_000, 0.05 * abs(acct.closing_balance))
+        if diff > threshold:
+            institution_label = acct.institution
+            if acct.account_number_last4:
+                institution_label += f" ({acct.account_number_last4})"
+            flags.append(DPFlag(
+                type=FlagType.DOCUMENT_INCOMPLETE,
+                severity=FlagSeverity.WARNING,
+                rationale=(
+                    f"Possible page manquante — écart de {diff:,.2f} $ pour le compte "
+                    f"{institution_label} (attendu: {expected_closing:,.2f} $, "
+                    f"déclaré: {acct.closing_balance:,.2f} $)"
+                ),
+                supporting_transaction_ids=[],
+                recommended_documents=["Relevé complet et intact (toutes les pages)"],
+            ))
+    return flags
+
+
 def detect_flags(
     transactions: list[DPTransaction],
     transfers: list[TransferMatch],
@@ -240,17 +288,18 @@ def detect_flags(
         # Skip transfer deposits for most flags
         is_transfer = dep.id in transfer_tx_ids
 
-        # Large deposit
-        if dep.amount > LARGE_DEPOSIT_ABS_THRESHOLD or dep.amount > relative_threshold:
-            if not is_transfer:
-                severity = FlagSeverity.CRITICAL if dep.amount > target_dp * 0.25 else FlagSeverity.WARNING
-                flags.append(DPFlag(
-                    type=FlagType.LARGE_DEPOSIT,
-                    severity=severity,
-                    rationale=f"Dépôt important de {dep.amount:,.2f} $ le {dep.date} — {dep.description}",
-                    supporting_transaction_ids=[dep.id],
-                    recommended_documents=["Preuve de provenance des fonds", "Relevé de compte source"],
-                ))
+        # Large deposit (payroll is already income — skip)
+        if (dep.amount > LARGE_DEPOSIT_ABS_THRESHOLD or dep.amount > relative_threshold) \
+                and not is_transfer \
+                and dep.category != TransactionCategory.PAYROLL:
+            severity = FlagSeverity.CRITICAL if dep.amount > target_dp * 0.25 else FlagSeverity.WARNING
+            flags.append(DPFlag(
+                type=FlagType.LARGE_DEPOSIT,
+                severity=severity,
+                rationale=f"Dépôt important de {dep.amount:,.2f} $ le {dep.date} — {dep.description}",
+                supporting_transaction_ids=[dep.id],
+                recommended_documents=["Preuve de provenance des fonds", "Relevé de compte source"],
+            ))
 
         # Cash deposit
         if _has_keywords(dep.description, CASH_KEYWORDS) or dep.category == TransactionCategory.CASH:
@@ -261,6 +310,36 @@ def detect_flags(
                 rationale=f"Dépôt en espèces de {dep.amount:,.2f} $ le {dep.date} — {dep.description}",
                 supporting_transaction_ids=[dep.id],
                 recommended_documents=["Lettre explicative pour dépôt en espèces"],
+            ))
+
+        # Crypto source
+        if _has_keywords(dep.description, CRYPTO_KEYWORDS) and not is_transfer:
+            severity = FlagSeverity.CRITICAL if dep.amount >= 10_000 else FlagSeverity.WARNING
+            flags.append(DPFlag(
+                type=FlagType.CRYPTO_SOURCE,
+                severity=severity,
+                rationale=f"Source crypto-monnaie possible pour {dep.amount:,.2f} $ le {dep.date} — {dep.description}",
+                supporting_transaction_ids=[dep.id],
+                recommended_documents=[
+                    "Historique complet de la plateforme crypto",
+                    "Preuve de taux de conversion en CAD",
+                    "Identification de la plateforme (NIP, relevé officiel)",
+                ],
+            ))
+
+        # Foreign currency / international wire
+        if _has_keywords(dep.description, FX_KEYWORDS) and not is_transfer \
+                and not _has_keywords(dep.description, TRANSFER_KEYWORDS):
+            flags.append(DPFlag(
+                type=FlagType.FOREIGN_CURRENCY,
+                severity=FlagSeverity.WARNING,
+                rationale=f"Possible virement en devise étrangère de {dep.amount:,.2f} $ le {dep.date} — {dep.description}",
+                supporting_transaction_ids=[dep.id],
+                recommended_documents=[
+                    "Confirmation du taux de change à la date de la transaction",
+                    "Contrat ou facture justifiant la source du virement international",
+                    "Relevé du compte étranger source",
+                ],
             ))
 
         # Round amount
@@ -374,6 +453,9 @@ def detect_flags(
                     supporting_transaction_ids=[],
                     recommended_documents=["Relevés bancaires couvrant au moins 90 jours"],
                 ))
+
+    # Document gaps (missing pages)
+    flags.extend(_detect_document_gaps(accounts, transactions))
 
     # Unexplained source: large deposits with category "other" or unmatched "transfer" category
     for dep in deposits:
@@ -502,6 +584,44 @@ def generate_client_requests(
                 reason="La période couverte par les relevés est insuffisante. "
                        "Le prêteur exige un minimum de 90 jours de relevés.",
                 required_docs=["Relevés bancaires couvrant au moins 90 jours"],
+                supporting_transaction_ids=[],
+            ))
+
+        elif flag.type == FlagType.CRYPTO_SOURCE and FlagType.CRYPTO_SOURCE not in seen_types:
+            seen_types.add(FlagType.CRYPTO_SOURCE)
+            requests.append(ClientRequest(
+                title="Documentation — Source crypto-monnaie",
+                reason="Un ou plusieurs dépôts provenant d'une plateforme de crypto-monnaie ont été détectés. "
+                       "Le prêteur exige une traçabilité complète de ces fonds.",
+                required_docs=[
+                    "Historique complet de la plateforme crypto",
+                    "Preuve de taux de conversion en CAD",
+                    "Identification de la plateforme (NIP, relevé officiel)",
+                ],
+                supporting_transaction_ids=flag.supporting_transaction_ids,
+            ))
+
+        elif flag.type == FlagType.FOREIGN_CURRENCY and FlagType.FOREIGN_CURRENCY not in seen_types:
+            seen_types.add(FlagType.FOREIGN_CURRENCY)
+            requests.append(ClientRequest(
+                title="Documentation — Virement en devise étrangère",
+                reason="Un ou plusieurs virements en devise étrangère ont été détectés. "
+                       "Le prêteur exige une justification de la source internationale des fonds.",
+                required_docs=[
+                    "Confirmation du taux de change à la date de la transaction",
+                    "Contrat ou facture justifiant la source du virement international",
+                    "Relevé du compte étranger source",
+                ],
+                supporting_transaction_ids=flag.supporting_transaction_ids,
+            ))
+
+        elif flag.type == FlagType.DOCUMENT_INCOMPLETE and FlagType.DOCUMENT_INCOMPLETE not in seen_types:
+            seen_types.add(FlagType.DOCUMENT_INCOMPLETE)
+            requests.append(ClientRequest(
+                title="Relevé complet et intact (toutes les pages)",
+                reason="Un écart a été détecté entre les soldes d'ouverture/fermeture et les transactions listées. "
+                       "Des pages pourraient être manquantes.",
+                required_docs=["Relevé complet et intact (toutes les pages)"],
                 supporting_transaction_ids=[],
             ))
 

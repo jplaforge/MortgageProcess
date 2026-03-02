@@ -15,6 +15,7 @@ from mortgage_mcp.models.downpayment import (
     TransferMatch,
 )
 from mortgage_mcp.services.downpayment_analyzer import (
+    _detect_document_gaps,
     analyze,
     build_summary,
     calculate_source_breakdown,
@@ -270,6 +271,66 @@ class TestDetectFlags:
         recurring = [f for f in flags if f.type == FlagType.NON_PAYROLL_RECURRING]
         assert len(recurring) >= 1
 
+    def test_payroll_not_flagged_as_large_deposit(self):
+        """Payroll deposits should not be flagged as large deposits even when above threshold."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "PAIE EMPLOYEUR", 8000, TransactionType.DEPOSIT, TransactionCategory.PAYROLL, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        large_flags = [f for f in flags if f.type == FlagType.LARGE_DEPOSIT]
+        assert len(large_flags) == 0
+
+    def test_crypto_deposit_flagged_warning(self):
+        txns = [
+            _tx("A1-001", "2025-01-15", "COINBASE TRANSFER", 3000, TransactionType.DEPOSIT, TransactionCategory.OTHER, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        crypto_flags = [f for f in flags if f.type == FlagType.CRYPTO_SOURCE]
+        assert len(crypto_flags) == 1
+        assert crypto_flags[0].severity == FlagSeverity.WARNING
+
+    def test_crypto_deposit_critical_above_10k(self):
+        txns = [
+            _tx("A1-001", "2025-01-15", "SHAKEPAY CRYPTO WITHDRAWAL", 15000, TransactionType.DEPOSIT, TransactionCategory.OTHER, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        crypto_flags = [f for f in flags if f.type == FlagType.CRYPTO_SOURCE]
+        assert len(crypto_flags) == 1
+        assert crypto_flags[0].severity == FlagSeverity.CRITICAL
+
+    def test_crypto_transfer_not_double_flagged(self):
+        """Crypto deposit matched as transfer should not be flagged."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "VIREMENT COINBASE", 3000, TransactionType.WITHDRAWAL, TransactionCategory.TRANSFER, "A1"),
+            _tx("A2-001", "2025-01-15", "COINBASE TRANSFER", 3000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A2"),
+        ]
+        transfers = [TransferMatch(
+            from_account_id="A1", to_account_id="A2", amount=3000,
+            from_transaction_id="A1-001", to_transaction_id="A2-001",
+            date_delta_days=0, match_score=0.9,
+        )]
+        flags = detect_flags(txns, transfers, [], 80000)
+        crypto_flags = [f for f in flags if f.type == FlagType.CRYPTO_SOURCE]
+        assert len(crypto_flags) == 0
+
+    def test_foreign_wire_flagged(self):
+        txns = [
+            _tx("A1-001", "2025-01-15", "WIRE IN USD FROM ABROAD", 5000, TransactionType.DEPOSIT, TransactionCategory.OTHER, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        fx_flags = [f for f in flags if f.type == FlagType.FOREIGN_CURRENCY]
+        assert len(fx_flags) == 1
+        assert fx_flags[0].severity == FlagSeverity.WARNING
+
+    def test_domestic_transfer_not_flagged_as_foreign(self):
+        """A deposit with VIREMENT (domestic transfer keyword) should not be flagged as FX."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "VIREMENT INTERAC DEPUIS COMPTE", 5000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        fx_flags = [f for f in flags if f.type == FlagType.FOREIGN_CURRENCY]
+        assert len(fx_flags) == 0
+
     def test_unmatched_transfer_deposit_flagged(self):
         """Transfer-category deposit without matching withdrawal should be flagged."""
         txns = [
@@ -279,6 +340,38 @@ class TestDetectFlags:
         unexplained = [f for f in flags if f.type == FlagType.UNEXPLAINED_SOURCE]
         assert len(unexplained) >= 1
         assert unexplained[0].severity == FlagSeverity.WARNING
+
+    def test_document_gap_detected(self):
+        """Missing pages detected when computed closing ≠ stated closing."""
+        accts = [
+            DPAccountInfo(
+                account_id="A1", institution="Desjardins",
+                opening_balance=10_000, closing_balance=15_000,
+            ),
+        ]
+        # Only 3 000 in deposits, 0 out → expected closing = 13 000, stated = 15 000 → diff 2 000 > threshold
+        txns = [
+            _tx("A1-001", "2025-01-15", "PAIE", 3000, TransactionType.DEPOSIT, TransactionCategory.PAYROLL, "A1"),
+        ]
+        flags = detect_flags(txns, [], accts, 80000)
+        gap_flags = [f for f in flags if f.type == FlagType.DOCUMENT_INCOMPLETE]
+        assert len(gap_flags) == 1
+        assert gap_flags[0].severity == FlagSeverity.WARNING
+
+    def test_no_document_gap_when_balanced(self):
+        """No flag when computed closing matches stated closing."""
+        accts = [
+            DPAccountInfo(
+                account_id="A1", institution="Desjardins",
+                opening_balance=10_000, closing_balance=13_000,
+            ),
+        ]
+        txns = [
+            _tx("A1-001", "2025-01-15", "PAIE", 3000, TransactionType.DEPOSIT, TransactionCategory.PAYROLL, "A1"),
+        ]
+        flags = detect_flags(txns, [], accts, 80000)
+        gap_flags = [f for f in flags if f.type == FlagType.DOCUMENT_INCOMPLETE]
+        assert len(gap_flags) == 0
 
     def test_matched_transfer_deposit_not_flagged_unexplained(self):
         """Transfer-category deposit that IS matched should NOT be flagged as unexplained."""
@@ -398,6 +491,42 @@ class TestClientRequests:
         ]
         reqs = generate_client_requests(flags, [])
         assert any("complémentaires" in r.title.lower() for r in reqs)
+
+    def test_crypto_source_request(self):
+        flags = [
+            DPFlag(type=FlagType.CRYPTO_SOURCE, severity=FlagSeverity.WARNING,
+                   rationale="Crypto", supporting_transaction_ids=["A1-001"]),
+        ]
+        reqs = generate_client_requests(flags, [])
+        assert any("crypto" in r.title.lower() for r in reqs)
+
+    def test_foreign_currency_request(self):
+        flags = [
+            DPFlag(type=FlagType.FOREIGN_CURRENCY, severity=FlagSeverity.WARNING,
+                   rationale="Wire", supporting_transaction_ids=["A1-001"]),
+        ]
+        reqs = generate_client_requests(flags, [])
+        assert any("devise" in r.title.lower() or "virement" in r.title.lower() for r in reqs)
+
+    def test_document_incomplete_request(self):
+        flags = [
+            DPFlag(type=FlagType.DOCUMENT_INCOMPLETE, severity=FlagSeverity.WARNING,
+                   rationale="Écart"),
+        ]
+        reqs = generate_client_requests(flags, [])
+        assert any("relevé" in r.title.lower() for r in reqs)
+
+    def test_no_duplicate_requests_for_same_type(self):
+        """Multiple flags of same type should produce only one client request."""
+        flags = [
+            DPFlag(type=FlagType.CRYPTO_SOURCE, severity=FlagSeverity.WARNING,
+                   rationale="Crypto 1", supporting_transaction_ids=["A1-001"]),
+            DPFlag(type=FlagType.CRYPTO_SOURCE, severity=FlagSeverity.CRITICAL,
+                   rationale="Crypto 2", supporting_transaction_ids=["A1-002"]),
+        ]
+        reqs = generate_client_requests(flags, [])
+        crypto_reqs = [r for r in reqs if "crypto" in r.title.lower()]
+        assert len(crypto_reqs) == 1
 
     def test_references_transaction_ids(self):
         flags = [
