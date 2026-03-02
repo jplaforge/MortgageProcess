@@ -2,11 +2,26 @@
 
 import os
 
+from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.fastmcp import FastMCP
 
 from mortgage_mcp.config import settings
 
 port = int(os.environ.get("PORT", settings.port))
+
+
+class BearerTokenVerifier(TokenVerifier):
+    """Verify requests against the MCP_AUTH_TOKEN environment variable."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not settings.mcp_auth_token:
+            return None
+        if token != settings.mcp_auth_token:
+            return None
+        return AccessToken(token=token, client_id="mcp-client", scopes=[])
+
+
+token_verifier = BearerTokenVerifier() if settings.mcp_auth_token else None
 
 mcp = FastMCP(
     "WelcomeSpaces Mortgage Analyzer",
@@ -17,6 +32,7 @@ mcp = FastMCP(
     ),
     host="0.0.0.0",
     port=port,
+    token_verifier=token_verifier,
 )
 
 
