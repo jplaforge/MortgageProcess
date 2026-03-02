@@ -1,15 +1,29 @@
-"""Generate the Excel downpayment audit report from analysis results."""
+"""Generate the Excel downpayment audit report from analysis results.
+
+Produces a 3-sheet workbook designed for mortgage brokers:
+1. Résumé — verdict, key numbers, accounts, sources, transfers, flags
+2. Demandes au client — actionable document requests
+3. Détail — flagged transactions needing verification
+"""
 
 import base64
 import io
+from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from mortgage_mcp.models.downpayment import (
+    DPAccountInfo,
     DPAuditResult,
+    DPTransaction,
     FlagSeverity,
+    FlagType,
+    TransactionCategory,
+    TransactionType,
 )
+
+# ── Styling constants ─────────────────────────────────────────────────────
 
 HEADER_FONT = Font(bold=True, size=11)
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
@@ -34,6 +48,65 @@ SEVERITY_FONTS = {
     FlagSeverity.INFO: Font(color="1F4E79"),
 }
 
+VERDICT_STYLES = {
+    "green": (
+        PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+        Font(bold=True, size=14, color="006100"),
+    ),
+    "yellow": (
+        PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
+        Font(bold=True, size=14, color="9C6500"),
+    ),
+    "red": (
+        PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+        Font(bold=True, size=14, color="9C0006"),
+    ),
+}
+
+# ── French label maps ─────────────────────────────────────────────────────
+
+FLAG_TYPE_LABELS: dict[FlagType, str] = {
+    FlagType.LARGE_DEPOSIT: "Dépôt important",
+    FlagType.CASH_DEPOSIT: "Dépôt en espèces",
+    FlagType.NON_PAYROLL_RECURRING: "Récurrent non-salarial",
+    FlagType.MULTI_HOP_TRANSFER: "Chaîne de transferts",
+    FlagType.PERIOD_GAP: "Couverture insuffisante",
+    FlagType.ROUND_AMOUNT: "Montant rond",
+    FlagType.RAPID_SUCCESSION: "Succession rapide",
+    FlagType.UNEXPLAINED_SOURCE: "Source inexpliquée",
+}
+
+SEVERITY_LABELS: dict[FlagSeverity, str] = {
+    FlagSeverity.CRITICAL: "Critique",
+    FlagSeverity.WARNING: "Avertissement",
+    FlagSeverity.INFO: "Information",
+}
+
+CATEGORY_LABELS: dict[TransactionCategory, str] = {
+    TransactionCategory.PAYROLL: "Salaire",
+    TransactionCategory.BUSINESS_INCOME: "Revenu d'affaires",
+    TransactionCategory.TRANSFER: "Transfert",
+    TransactionCategory.CASH: "Espèces",
+    TransactionCategory.GOVERNMENT: "Gouvernement",
+    TransactionCategory.INVESTMENT: "Placement",
+    TransactionCategory.GIFT: "Don",
+    TransactionCategory.LOAN: "Prêt",
+    TransactionCategory.REFUND: "Remboursement",
+    TransactionCategory.BILL_PAYMENT: "Facture",
+    TransactionCategory.PURCHASE: "Achat",
+    TransactionCategory.OTHER: "Autre",
+}
+
+MONTH_NAMES_FR = {
+    1: "janv.", 2: "févr.", 3: "mars", 4: "avr.", 5: "mai", 6: "juin",
+    7: "juill.", 8: "août", 9: "sept.", 10: "oct.", 11: "nov.", 12: "déc.",
+}
+
+_SEVERITY_ORDER = {FlagSeverity.CRITICAL: 0, FlagSeverity.WARNING: 1, FlagSeverity.INFO: 2}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
 
 def _apply_header_style(ws, row: int, max_col: int) -> None:
     for col in range(1, max_col + 1):
@@ -49,22 +122,108 @@ def _set_col_widths(ws, widths: dict[str, int]) -> None:
         ws.column_dimensions[col_letter].width = width
 
 
-# ── Sheet fillers ─────────────────────────────────────────────────────────
+def _format_date_short(date_str: str) -> str:
+    """Format YYYY-MM-DD as '20 févr. 2025'."""
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return f"{dt.day} {MONTH_NAMES_FR[dt.month]} {dt.year}"
+    except (ValueError, KeyError):
+        return date_str
+
+
+def _build_account_lookup(accounts: list[DPAccountInfo]) -> dict[str, str]:
+    """Map account_id -> 'Institution (XXXX)' for human-readable labels."""
+    lookup = {}
+    for acct in accounts:
+        label = acct.institution
+        if acct.account_number_last4:
+            label += f" ({acct.account_number_last4})"
+        lookup[acct.account_id] = label
+    return lookup
+
+
+def _build_tx_lookup(
+    transactions: list[DPTransaction],
+    acct_lookup: dict[str, str],
+) -> dict[str, str]:
+    """Map transaction ID -> human-readable summary."""
+    lookup = {}
+    for tx in transactions:
+        acct_label = acct_lookup.get(tx.account_id, tx.account_id)
+        date_short = _format_date_short(tx.date)
+        desc = tx.description[:30] + "..." if len(tx.description) > 30 else tx.description
+        lookup[tx.id] = f"{tx.amount:,.0f} $ — {desc} ({date_short}, {acct_label})"
+    return lookup
+
+
+def _section_header(ws, row: int, title: str) -> int:
+    """Write a section header and return the next row."""
+    ws.cell(row=row, column=1, value=title).font = Font(bold=True, size=12)
+    return row + 1
+
+
+def _all_transfer_tx_ids(result: DPAuditResult) -> set[str]:
+    """Collect all transaction IDs involved in matched transfers."""
+    ids: set[str] = set()
+    for m in result.transfers:
+        ids.add(m.from_transaction_id)
+        if m.to_transaction_id:
+            ids.add(m.to_transaction_id)
+        ids.update(m.to_transaction_ids)
+    return ids
+
+
+# ── Sheet 1: Résumé ──────────────────────────────────────────────────────
 
 
 def _fill_resume(ws, result: DPAuditResult) -> None:
-    """Fill the Résumé (summary) sheet."""
+    """Fill the Résumé sheet: verdict, key numbers, accounts, sources, transfers, flags."""
+    acct_lookup = _build_account_lookup(result.accounts)
+    summary = result.summary
+
     row = 1
     ws.cell(row=row, column=1, value="Audit de la mise de fonds — Provenance des fonds").font = Font(bold=True, size=14)
     row += 2
 
-    # Deal info
-    deal_data = [
-        ("Emprunteur:", result.borrower_name),
-        ("Co-emprunteur:", result.co_borrower_name or "N/A"),
-        ("Date de clôture:", result.closing_date),
-        ("Mise de fonds cible:", result.summary.dp_target),
-    ]
+    # ── Verdict ──
+    has_critical = any(f.severity == FlagSeverity.CRITICAL for f in result.flags)
+    pct = summary.dp_explained_amount / summary.dp_target if summary.dp_target > 0 else 0
+
+    if not summary.needs_review:
+        verdict_text, style_key = "CONFORME", "green"
+    elif has_critical:
+        verdict_text, style_key = "RÉVISION REQUISE", "red"
+    else:
+        verdict_text, style_key = "À VÉRIFIER", "yellow"
+
+    verdict_fill, verdict_font = VERDICT_STYLES[style_key]
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+    verdict_cell = ws.cell(row=row, column=1, value=verdict_text)
+    verdict_cell.font = verdict_font
+    verdict_cell.fill = verdict_fill
+    verdict_cell.alignment = Alignment(horizontal="center", vertical="center")
+    verdict_cell.border = THIN_BORDER
+    for col in range(2, 4):
+        ws.cell(row=row, column=col).fill = verdict_fill
+        ws.cell(row=row, column=col).border = THIN_BORDER
+    row += 1
+
+    # Progress line
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+    progress_text = f"{pct:.0%} expliqué — {summary.dp_explained_amount:,.0f} $ / {summary.dp_target:,.0f} $"
+    progress_cell = ws.cell(row=row, column=1, value=progress_text)
+    progress_cell.font = Font(bold=True, size=11)
+    progress_cell.alignment = Alignment(horizontal="center")
+    row += 2
+
+    # ── Deal info ──
+    row = _section_header(ws, row, "Informations du dossier")
+    deal_data: list[tuple[str, str | float]] = [("Emprunteur:", result.borrower_name)]
+    if result.co_borrower_name:
+        deal_data.append(("Co-emprunteur:", result.co_borrower_name))
+    deal_data.append(("Date de clôture:", _format_date_short(result.closing_date)))
+    deal_data.append(("Mise de fonds cible:", summary.dp_target))
+
     for label, value in deal_data:
         ws.cell(row=row, column=1, value=label).font = HEADER_FONT
         cell = ws.cell(row=row, column=2, value=value)
@@ -77,195 +236,261 @@ def _fill_resume(ws, result: DPAuditResult) -> None:
         row += 1
     row += 1
 
-    # Source breakdown
-    ws.cell(row=row, column=1, value="Ventilation des sources").font = Font(bold=True, size=12)
-    row += 1
-    sb = result.summary.source_breakdown
+    # ── Accounts ──
+    if result.accounts:
+        row = _section_header(ws, row, "Comptes analysés")
+        acct_headers = ["Institution", "Titulaire", "No compte", "Période", "Solde ouverture", "Solde fermeture"]
+        for col, h in enumerate(acct_headers, 1):
+            ws.cell(row=row, column=col, value=h)
+        _apply_header_style(ws, row, len(acct_headers))
+        row += 1
+
+        for acct in result.accounts:
+            period = ""
+            if acct.period_start and acct.period_end:
+                period = f"{_format_date_short(acct.period_start)} — {_format_date_short(acct.period_end)}"
+            row_data = [
+                acct.institution, acct.holder_name,
+                acct.account_number_last4 or "—",
+                period,
+                acct.opening_balance, acct.closing_balance,
+            ]
+            for col, val in enumerate(row_data, 1):
+                cell = ws.cell(row=row, column=col, value=val)
+                cell.border = THIN_BORDER
+                if col in (5, 6):
+                    cell.number_format = CURRENCY_FORMAT
+            row += 1
+        row += 1
+
+    # ── Source breakdown (skip zeros) ──
+    row = _section_header(ws, row, "Ventilation des sources")
+    sb = summary.source_breakdown
     sources = [
-        ("Épargne salariale:", sb.payroll),
+        ("Accumulation salariale:", sb.payroll),
         ("Dons:", sb.gift),
         ("Vente de placements:", sb.investment_sale),
         ("Vente de propriété:", sb.property_sale),
         ("Autres sources expliquées:", sb.other_explained),
-        ("Sources non expliquées:", sb.unexplained),
     ]
     for label, value in sources:
-        ws.cell(row=row, column=1, value=label).font = HEADER_FONT
-        cell = ws.cell(row=row, column=2, value=value)
-        cell.number_format = CURRENCY_FORMAT
-        if label.startswith("Sources non") and value > 0:
-            cell.font = Font(color="9C0006", bold=True)
-        row += 1
-    row += 1
-
-    # Summary
-    ws.cell(row=row, column=1, value="Évaluation globale").font = Font(bold=True, size=12)
-    row += 1
-    ws.cell(row=row, column=1, value="Montant expliqué:").font = HEADER_FONT
-    ws.cell(row=row, column=2, value=result.summary.dp_explained_amount).number_format = CURRENCY_FORMAT
-    row += 1
-    ws.cell(row=row, column=1, value="Montant non expliqué:").font = HEADER_FONT
-    cell = ws.cell(row=row, column=2, value=result.summary.unexplained_amount)
-    cell.number_format = CURRENCY_FORMAT
-    row += 1
-    ws.cell(row=row, column=1, value="Nécessite révision:").font = HEADER_FONT
-    ws.cell(row=row, column=2, value="OUI" if result.summary.needs_review else "NON")
-    row += 1
-
-    if result.summary.review_notes:
-        row += 1
-        ws.cell(row=row, column=1, value="Notes de révision:").font = HEADER_FONT
-        row += 1
-        for note in result.summary.review_notes:
-            ws.cell(row=row, column=1, value=f"• {note}")
+        if value > 0:
+            ws.cell(row=row, column=1, value=label).font = HEADER_FONT
+            ws.cell(row=row, column=2, value=value).number_format = CURRENCY_FORMAT
             row += 1
 
-    # Flag summary
+    if sb.unexplained > 0:
+        ws.cell(row=row, column=1, value="Sources non expliquées:").font = HEADER_FONT
+        cell = ws.cell(row=row, column=2, value=sb.unexplained)
+        cell.number_format = CURRENCY_FORMAT
+        cell.font = Font(color="9C0006", bold=True)
+        row += 1
+    row += 1
+
+    # ── Transfers (inline, only if any) ──
+    if result.transfers:
+        row = _section_header(ws, row, "Transferts inter-comptes détectés")
+        tf_headers = ["De", "Vers", "Montant", "Détail"]
+        for col, h in enumerate(tf_headers, 1):
+            ws.cell(row=row, column=col, value=h)
+        _apply_header_style(ws, row, len(tf_headers))
+        row += 1
+
+        for tm in result.transfers:
+            from_label = acct_lookup.get(tm.from_account_id, tm.from_account_id)
+            to_label = acct_lookup.get(tm.to_account_id, tm.to_account_id)
+            if tm.is_split:
+                detail = f"Fractionné en {len(tm.to_transaction_ids)} dépôts"
+            elif tm.date_delta_days > 0:
+                detail = f"Délai: {tm.date_delta_days} jour(s)"
+            else:
+                detail = "Même jour"
+            for col, val in enumerate([from_label, to_label, tm.amount, detail], 1):
+                cell = ws.cell(row=row, column=col, value=val)
+                cell.border = THIN_BORDER
+                if col == 3:
+                    cell.number_format = CURRENCY_FORMAT
+            row += 1
+        row += 1
+
+    # ── Flags ──
     if result.flags:
-        row += 1
-        ws.cell(row=row, column=1, value="Résumé des drapeaux").font = Font(bold=True, size=12)
-        row += 1
+        row = _section_header(ws, row, "Drapeaux d'audit")
         critical = sum(1 for f in result.flags if f.severity == FlagSeverity.CRITICAL)
         warning = sum(1 for f in result.flags if f.severity == FlagSeverity.WARNING)
         info = sum(1 for f in result.flags if f.severity == FlagSeverity.INFO)
+        counts = []
         if critical:
-            ws.cell(row=row, column=1, value=f"Critiques: {critical}").font = Font(color="9C0006", bold=True)
-            row += 1
+            counts.append(f"{critical} critique(s)")
         if warning:
-            ws.cell(row=row, column=1, value=f"Avertissements: {warning}").font = Font(color="9C6500", bold=True)
-            row += 1
+            counts.append(f"{warning} avertissement(s)")
         if info:
-            ws.cell(row=row, column=1, value=f"Informations: {info}").font = Font(color="1F4E79")
+            counts.append(f"{info} information(s)")
+        ws.cell(row=row, column=1, value=" — ".join(counts)).font = Font(bold=True, size=10)
+        row += 1
+
+        flag_headers = ["Type", "Sévérité", "Explication"]
+        for col, h in enumerate(flag_headers, 1):
+            ws.cell(row=row, column=col, value=h)
+        _apply_header_style(ws, row, len(flag_headers))
+        row += 1
+
+        sorted_flags = sorted(result.flags, key=lambda f: _SEVERITY_ORDER.get(f.severity, 3))
+        for flag in sorted_flags:
+            ws.cell(row=row, column=1, value=FLAG_TYPE_LABELS.get(flag.type, flag.type.value)).border = THIN_BORDER
+            sev_cell = ws.cell(row=row, column=2, value=SEVERITY_LABELS.get(flag.severity, flag.severity.value))
+            sev_cell.border = THIN_BORDER
+            sev_cell.fill = SEVERITY_FILLS.get(flag.severity, PatternFill())
+            sev_cell.font = SEVERITY_FONTS.get(flag.severity, Font())
+            ws.cell(row=row, column=3, value=flag.rationale).border = THIN_BORDER
+            row += 1
+        row += 1
+
+    # ── Review notes ──
+    if summary.review_notes:
+        row = _section_header(ws, row, "Notes de révision")
+        for note in summary.review_notes:
+            ws.cell(row=row, column=1, value=f"• {note}")
             row += 1
 
-    _set_col_widths(ws, {"A": 35, "B": 40})
+    _set_col_widths(ws, {"A": 35, "B": 30, "C": 25, "D": 20, "E": 18, "F": 18})
 
 
-def _fill_comptes(ws, result: DPAuditResult) -> None:
-    """Fill the Comptes sheet."""
-    headers = ["ID", "Institution", "Titulaire", "Période début", "Période fin",
-               "Solde ouverture", "Solde fermeture", "Confiance"]
-    for col, h in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=h)
-    _apply_header_style(ws, 1, len(headers))
-
-    for i, acct in enumerate(result.accounts, start=2):
-        row_data = [
-            acct.account_id, acct.institution, acct.holder_name,
-            acct.period_start, acct.period_end,
-            acct.opening_balance, acct.closing_balance, acct.confidence,
-        ]
-        for col, val in enumerate(row_data, 1):
-            cell = ws.cell(row=i, column=col, value=val)
-            cell.border = THIN_BORDER
-            if col in (6, 7):
-                cell.number_format = CURRENCY_FORMAT
-
-    _set_col_widths(ws, {"A": 8, "B": 25, "C": 25, "D": 14, "E": 14, "F": 18, "G": 18, "H": 12})
+# ── Sheet 2: Demandes au client ──────────────────────────────────────────
 
 
-def _fill_key_transactions(ws, result: DPAuditResult) -> None:
-    """Fill the Transactions clés sheet — flagged deposits and large deposits."""
-    headers = ["ID", "Date", "Compte", "Description", "Montant", "Catégorie", "Page", "Flags"]
-    for col, h in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=h)
-    _apply_header_style(ws, 1, len(headers))
+def _fill_demandes(ws, result: DPAuditResult) -> None:
+    """Fill the Demandes au client sheet — numbered action cards."""
+    acct_lookup = _build_account_lookup(result.accounts)
+    tx_lookup = _build_tx_lookup(result.transactions, acct_lookup)
 
-    # Collect flagged transaction IDs
-    flagged_ids: dict[str, list[str]] = {}
+    row = 1
+    ws.cell(row=row, column=1, value="Demandes au client").font = Font(bold=True, size=14)
+    row += 1
+
+    if not result.client_requests:
+        ws.cell(row=row, column=1, value="Aucune demande requise.").font = Font(italic=True, size=11)
+        _set_col_widths(ws, {"A": 50})
+        return
+
+    ws.cell(
+        row=row, column=1,
+        value=f"{len(result.client_requests)} document(s) à demander au client",
+    ).font = Font(size=11)
+    row += 2
+
+    for i, req in enumerate(result.client_requests, 1):
+        ws.cell(row=row, column=1, value=f"{i}. {req.title}").font = Font(bold=True, size=12)
+        row += 1
+
+        ws.cell(row=row, column=1, value="Raison:").font = HEADER_FONT
+        ws.cell(row=row, column=2, value=req.reason)
+        row += 1
+
+        ws.cell(row=row, column=1, value="Documents requis:").font = HEADER_FONT
+        for doc in req.required_docs:
+            ws.cell(row=row, column=2, value=f"• {doc}")
+            row += 1
+
+        if req.supporting_transaction_ids:
+            ws.cell(row=row, column=1, value="Transactions concernées:").font = HEADER_FONT
+            for tid in req.supporting_transaction_ids:
+                ref = tx_lookup.get(tid, tid)
+                ws.cell(row=row, column=2, value=f"• {ref}")
+                row += 1
+
+        row += 1  # blank line between requests
+
+    _set_col_widths(ws, {"A": 30, "B": 70})
+
+
+# ── Sheet 3: Détail ──────────────────────────────────────────────────────
+
+
+def _fill_detail(ws, result: DPAuditResult) -> None:
+    """Fill the Détail sheet — significant transactions needing attention.
+
+    Only includes WARNING+ flagged transactions and large unflagged deposits.
+    INFO-only flags (like non_payroll_recurring) are excluded to reduce noise.
+    """
+    acct_lookup = _build_account_lookup(result.accounts)
+
+    row = 1
+    ws.cell(row=row, column=1, value="Transactions nécessitant une vérification").font = Font(bold=True, size=14)
+    row += 2
+
+    # Build flagged IDs map: tx_id -> [(french_label, severity)]
+    flagged_ids: dict[str, list[tuple[str, FlagSeverity]]] = {}
     for flag in result.flags:
         for tid in flag.supporting_transaction_ids:
-            flagged_ids.setdefault(tid, []).append(flag.type.value)
+            flagged_ids.setdefault(tid, []).append(
+                (FLAG_TYPE_LABELS.get(flag.type, flag.type.value), flag.severity)
+            )
 
-    # Key transactions: flagged or large deposits
-    transfer_tx_ids = {m.from_transaction_id for m in result.transfers} | {m.to_transaction_id for m in result.transfers}
-    key_txns = [
-        t for t in result.transactions
-        if t.id in flagged_ids or (t.type.value == "deposit" and t.amount >= 5000 and t.id not in transfer_tx_ids)
-    ]
+    transfer_tx_ids = _all_transfer_tx_ids(result)
+
+    # Filter: WARNING+ flagged transactions, or large deposits (>=5k) not in transfers
+    key_txns: list[DPTransaction] = []
+    for t in result.transactions:
+        if t.id in flagged_ids:
+            highest_sev = min(
+                (sev for _, sev in flagged_ids[t.id]),
+                key=lambda s: _SEVERITY_ORDER[s],
+            )
+            if highest_sev != FlagSeverity.INFO:
+                key_txns.append(t)
+        elif (
+            t.type == TransactionType.DEPOSIT
+            and t.amount >= 5000
+            and t.id not in transfer_tx_ids
+        ):
+            key_txns.append(t)
     key_txns.sort(key=lambda t: t.date)
 
-    for i, txn in enumerate(key_txns, start=2):
-        flag_text = ", ".join(flagged_ids.get(txn.id, []))
-        row_data = [
-            txn.id, txn.date, txn.account_id, txn.description,
-            txn.amount, txn.category.value, txn.page_source, flag_text,
-        ]
-        for col, val in enumerate(row_data, 1):
-            cell = ws.cell(row=i, column=col, value=val)
-            cell.border = THIN_BORDER
-            if col == 5:
-                cell.number_format = CURRENCY_FORMAT
+    if not key_txns:
+        ws.cell(row=row, column=1, value="Aucune transaction nécessitant une vérification.").font = Font(
+            italic=True, size=11,
+        )
+        _set_col_widths(ws, {"A": 50})
+        return
 
-    _set_col_widths(ws, {"A": 10, "B": 12, "C": 10, "D": 45, "E": 16, "F": 18, "G": 8, "H": 30})
-
-
-def _fill_transfers(ws, result: DPAuditResult) -> None:
-    """Fill the Transferts sheet."""
-    headers = ["De (compte)", "Vers (compte)", "Montant", "ID retrait", "ID(s) dépôt", "Delta jours", "Score", "Split"]
+    headers = ["Date", "Compte", "Description", "Montant", "Catégorie", "Drapeaux"]
     for col, h in enumerate(headers, 1):
-        ws.cell(row=1, column=col, value=h)
-    _apply_header_style(ws, 1, len(headers))
+        ws.cell(row=row, column=col, value=h)
+    _apply_header_style(ws, row, len(headers))
+    row += 1
 
-    for i, tm in enumerate(result.transfers, start=2):
-        dep_ids = ", ".join(tm.to_transaction_ids) if tm.to_transaction_ids else tm.to_transaction_id
+    for txn in key_txns:
+        acct_label = acct_lookup.get(txn.account_id, txn.account_id)
+        flag_info = flagged_ids.get(txn.id, [])
+        flag_text = ", ".join(label for label, _ in flag_info) if flag_info else ""
+
+        highest_sev = None
+        if flag_info:
+            highest_sev = min(
+                (sev for _, sev in flag_info),
+                key=lambda s: _SEVERITY_ORDER[s],
+            )
+
         row_data = [
-            tm.from_account_id, tm.to_account_id, tm.amount,
-            tm.from_transaction_id, dep_ids,
-            tm.date_delta_days, tm.match_score,
-            "OUI" if tm.is_split else "",
+            _format_date_short(txn.date),
+            acct_label,
+            txn.description,
+            txn.amount,
+            CATEGORY_LABELS.get(txn.category, txn.category.value),
+            flag_text,
         ]
         for col, val in enumerate(row_data, 1):
-            cell = ws.cell(row=i, column=col, value=val)
+            cell = ws.cell(row=row, column=col, value=val)
             cell.border = THIN_BORDER
-            if col == 3:
+            if col == 4:
                 cell.number_format = CURRENCY_FORMAT
-
-    _set_col_widths(ws, {"A": 14, "B": 14, "C": 16, "D": 14, "E": 20, "F": 12, "G": 10, "H": 8})
-
-
-def _fill_flags_and_requests(ws, result: DPAuditResult) -> None:
-    """Fill the Flags & Demandes sheet."""
-    row = 1
-    ws.cell(row=row, column=1, value="Drapeaux d'audit").font = Font(bold=True, size=12)
-    row += 1
-
-    flag_headers = ["Type", "Sévérité", "Explication", "Transactions", "Docs recommandés"]
-    for col, h in enumerate(flag_headers, 1):
-        ws.cell(row=row, column=col, value=h)
-    _apply_header_style(ws, row, len(flag_headers))
-    row += 1
-
-    for flag in result.flags:
-        ws.cell(row=row, column=1, value=flag.type.value).border = THIN_BORDER
-        sev_cell = ws.cell(row=row, column=2, value=flag.severity.value)
-        sev_cell.border = THIN_BORDER
-        sev_cell.fill = SEVERITY_FILLS.get(flag.severity, PatternFill())
-        sev_cell.font = SEVERITY_FONTS.get(flag.severity, Font())
-        ws.cell(row=row, column=3, value=flag.rationale).border = THIN_BORDER
-        ws.cell(row=row, column=4, value=", ".join(flag.supporting_transaction_ids)).border = THIN_BORDER
-        ws.cell(row=row, column=5, value=", ".join(flag.recommended_documents)).border = THIN_BORDER
+            if col == 6 and highest_sev:
+                cell.fill = SEVERITY_FILLS.get(highest_sev, PatternFill())
+                cell.font = SEVERITY_FONTS.get(highest_sev, Font())
         row += 1
 
-    # Client requests
-    row += 2
-    ws.cell(row=row, column=1, value="Demandes au client").font = Font(bold=True, size=12)
-    row += 1
-
-    req_headers = ["Titre", "Raison", "Documents requis", "Transactions"]
-    for col, h in enumerate(req_headers, 1):
-        ws.cell(row=row, column=col, value=h)
-    _apply_header_style(ws, row, len(req_headers))
-    row += 1
-
-    for req in result.client_requests:
-        ws.cell(row=row, column=1, value=req.title).border = THIN_BORDER
-        ws.cell(row=row, column=2, value=req.reason).border = THIN_BORDER
-        ws.cell(row=row, column=3, value=", ".join(req.required_docs)).border = THIN_BORDER
-        ws.cell(row=row, column=4, value=", ".join(req.supporting_transaction_ids)).border = THIN_BORDER
-        row += 1
-
-    _set_col_widths(ws, {"A": 25, "B": 20, "C": 55, "D": 25, "E": 45})
+    _set_col_widths(ws, {"A": 18, "B": 28, "C": 45, "D": 16, "E": 18, "F": 30})
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -277,16 +502,12 @@ def generate_dp_excel(result: DPAuditResult) -> bytes:
 
     ws_resume = wb.active
     ws_resume.title = "Résumé"
-    ws_comptes = wb.create_sheet("Comptes")
-    ws_key_txns = wb.create_sheet("Transactions clés")
-    ws_transfers = wb.create_sheet("Transferts")
-    ws_flags = wb.create_sheet("Flags & Demandes")
+    ws_demandes = wb.create_sheet("Demandes au client")
+    ws_detail = wb.create_sheet("Détail")
 
     _fill_resume(ws_resume, result)
-    _fill_comptes(ws_comptes, result)
-    _fill_key_transactions(ws_key_txns, result)
-    _fill_transfers(ws_transfers, result)
-    _fill_flags_and_requests(ws_flags, result)
+    _fill_demandes(ws_demandes, result)
+    _fill_detail(ws_detail, result)
 
     buf = io.BytesIO()
     wb.save(buf)
