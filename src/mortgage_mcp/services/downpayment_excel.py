@@ -202,16 +202,18 @@ def _fill_key_transactions(ws, result: DPAuditResult) -> None:
 
 def _fill_transfers(ws, result: DPAuditResult) -> None:
     """Fill the Transferts sheet."""
-    headers = ["De (compte)", "Vers (compte)", "Montant", "ID retrait", "ID dépôt", "Delta jours", "Score"]
+    headers = ["De (compte)", "Vers (compte)", "Montant", "ID retrait", "ID(s) dépôt", "Delta jours", "Score", "Split"]
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
     _apply_header_style(ws, 1, len(headers))
 
     for i, tm in enumerate(result.transfers, start=2):
+        dep_ids = ", ".join(tm.to_transaction_ids) if tm.to_transaction_ids else tm.to_transaction_id
         row_data = [
             tm.from_account_id, tm.to_account_id, tm.amount,
-            tm.from_transaction_id, tm.to_transaction_id,
+            tm.from_transaction_id, dep_ids,
             tm.date_delta_days, tm.match_score,
+            "OUI" if tm.is_split else "",
         ]
         for col, val in enumerate(row_data, 1):
             cell = ws.cell(row=i, column=col, value=val)
@@ -219,7 +221,7 @@ def _fill_transfers(ws, result: DPAuditResult) -> None:
             if col == 3:
                 cell.number_format = CURRENCY_FORMAT
 
-    _set_col_widths(ws, {"A": 14, "B": 14, "C": 16, "D": 14, "E": 14, "F": 12, "G": 10})
+    _set_col_widths(ws, {"A": 14, "B": 14, "C": 16, "D": 14, "E": 20, "F": 12, "G": 10, "H": 8})
 
 
 def _fill_flags_and_requests(ws, result: DPAuditResult) -> None:

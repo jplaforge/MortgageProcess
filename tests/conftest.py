@@ -505,6 +505,7 @@ def dp_audit_result() -> DPAuditResult:
         transfers=[
             TransferMatch(from_account_id="A1", to_account_id="A2", amount=5000.00,
                           from_transaction_id="A1-009", to_transaction_id="A2-001",
+                          to_transaction_ids=["A2-001"],
                           date_delta_days=1, match_score=0.85),
         ],
         flags=[

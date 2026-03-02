@@ -120,6 +120,43 @@ class TestMatchTransfers:
         assert len(matched_wd_ids) == 2
         assert len(matched_dep_ids) == 2
 
+    def test_split_transfer_match(self):
+        """One withdrawal split into two deposits on another account."""
+        txns = [
+            _tx("A2-001", "2025-01-20", "TRANSFERT VERS COMPTE EXTERNE", 6000, TransactionType.WITHDRAWAL, TransactionCategory.TRANSFER, "A2"),
+            _tx("A1-001", "2025-01-21", "TRANSFERT ENTRANT", 2500, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+            _tx("A1-002", "2025-01-22", "TRANSFERT ENTRANT", 3500, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+        ]
+        matches = match_transfers(txns)
+        assert len(matches) == 1
+        m = matches[0]
+        assert m.is_split is True
+        assert m.from_transaction_id == "A2-001"
+        assert set(m.to_transaction_ids) == {"A1-001", "A1-002"}
+        assert m.amount == 6000
+
+    def test_split_transfer_not_triggered_when_1to1_matches(self):
+        """If 1:1 match exists, split should not double-match."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "VIREMENT", 5000, TransactionType.WITHDRAWAL, TransactionCategory.TRANSFER, "A1"),
+            _tx("A2-001", "2025-01-15", "TRANSFERT", 5000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A2"),
+        ]
+        matches = match_transfers(txns)
+        assert len(matches) == 1
+        assert matches[0].is_split is False
+
+    def test_split_transfer_outside_tolerance_no_match(self):
+        """Split deposits that don't sum close enough should not match."""
+        txns = [
+            _tx("A2-001", "2025-01-20", "TRANSFERT VERS EXTERNE", 6000, TransactionType.WITHDRAWAL, TransactionCategory.TRANSFER, "A2"),
+            _tx("A1-001", "2025-01-21", "TRANSFERT ENTRANT", 2000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+            _tx("A1-002", "2025-01-22", "TRANSFERT ENTRANT", 2000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+        ]
+        matches = match_transfers(txns)
+        # 2000+2000=4000 vs 6000 → 33% off, should not match
+        split_matches = [m for m in matches if m.is_split]
+        assert len(split_matches) == 0
+
 
 # ── Flag detection tests ─────────────────────────────────────────────────
 
@@ -233,6 +270,32 @@ class TestDetectFlags:
         recurring = [f for f in flags if f.type == FlagType.NON_PAYROLL_RECURRING]
         assert len(recurring) >= 1
 
+    def test_unmatched_transfer_deposit_flagged(self):
+        """Transfer-category deposit without matching withdrawal should be flagged."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "TRANSFERT ENTRANT", 8000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+        ]
+        flags = detect_flags(txns, [], [], 80000)
+        unexplained = [f for f in flags if f.type == FlagType.UNEXPLAINED_SOURCE]
+        assert len(unexplained) >= 1
+        assert unexplained[0].severity == FlagSeverity.WARNING
+
+    def test_matched_transfer_deposit_not_flagged_unexplained(self):
+        """Transfer-category deposit that IS matched should NOT be flagged as unexplained."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "VIREMENT", 8000, TransactionType.WITHDRAWAL, TransactionCategory.TRANSFER, "A1"),
+            _tx("A2-001", "2025-01-15", "TRANSFERT", 8000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A2"),
+        ]
+        transfers = [TransferMatch(
+            from_account_id="A1", to_account_id="A2", amount=8000,
+            from_transaction_id="A1-001", to_transaction_id="A2-001",
+            to_transaction_ids=["A2-001"],
+            date_delta_days=0, match_score=0.9,
+        )]
+        flags = detect_flags(txns, transfers, [], 80000)
+        unexplained = [f for f in flags if f.type == FlagType.UNEXPLAINED_SOURCE]
+        assert len(unexplained) == 0
+
 
 # ── Source breakdown tests ───────────────────────────────────────────────
 
@@ -287,6 +350,17 @@ class TestSourceBreakdown:
         ]
         sb = calculate_source_breakdown(txns, [], 10000)
         assert sb.other_explained == 5000
+
+    def test_unmatched_transfer_as_other_explained(self):
+        """Unmatched transfer-category deposits should count as other_explained."""
+        txns = [
+            _tx("A1-001", "2025-01-15", "TRANSFERT ENTRANT", 5000, TransactionType.DEPOSIT, TransactionCategory.TRANSFER, "A1"),
+            _tx("A1-002", "2025-01-20", "PAIE", 3000, TransactionType.DEPOSIT, TransactionCategory.PAYROLL, "A1"),
+        ]
+        sb = calculate_source_breakdown(txns, [], 20000)
+        assert sb.payroll == 3000
+        assert sb.other_explained == 5000
+        assert sb.unexplained == 12000
 
 
 # ── Client requests tests ────────────────────────────────────────────────

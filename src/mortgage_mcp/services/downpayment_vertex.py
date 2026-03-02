@@ -37,7 +37,7 @@ Pour CHAQUE transaction sur CHAQUE compte, crée une entrée dans `transactions`
 - `category`: catégorisation basique:
   * `payroll`: salaire, paie régulière (mots-clés: PAIE, SALAIRE, PAYROLL, DIRECT DEPOSIT)
   * `business_income`: revenus d'entreprise, clients, honoraires
-  * `transfer`: virements entre comptes, transferts (VIREMENT, TRANSFERT, TFR, INTERAC entre comptes)
+  * `transfer`: UNIQUEMENT les virements entre les PROPRES comptes de l'emprunteur (ex: "TRANSFERT VERS COMPTE ÉPARGNE", "TFR ENTRE COMPTES"). Ne PAS utiliser pour les virements Interac reçus de tiers ou les e-transfers reçus — ceux-ci sont `other` ou `business_income`
   * `cash`: dépôts en espèces (CASH, COMPTANT, GUICHET, ATM, DEPOT ESPECES)
   * `government`: paiements gouvernementaux (TPS, TVH, ARC, CRA, PRESTATIONS)
   * `investment`: placements, REER, CELI (PLACEMENT, REER, CELI, INVESTISSEMENT)
@@ -61,6 +61,14 @@ Pour CHAQUE transaction sur CHAQUE compte, crée une entrée dans `transactions`
 - NE FAIS PAS le matching de transferts inter-comptes — le post-traitement Python s'en charge
 - NE FAIS PAS la détection de drapeaux — le post-traitement Python s'en charge
 - Concentre-toi uniquement sur l'extraction précise et exhaustive
+
+### 4. Distinction CRITIQUE: `transfer` vs `other`
+- `transfer` = UNIQUEMENT les mouvements entre les propres comptes de l'emprunteur
+  (ex: retrait "VIREMENT VERS COMPTE ÉPARGNE", dépôt "TRANSFERT DEPUIS COMPTE CHÈQUES")
+- Les virements Interac REÇUS de tiers (VIR. INTERAC RECU, E-TRANSFER RECU) = `other`
+  sauf si la description indique clairement un transfert entre comptes de l'emprunteur
+- En cas de doute sur la source d'un virement reçu, catégorise comme `other`
+- Le post-traitement Python identifiera les vrais transferts inter-comptes par montant/date
 """
 
 

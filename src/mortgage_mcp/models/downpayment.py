@@ -91,15 +91,17 @@ class FlagType(str, Enum):
 
 
 class TransferMatch(BaseModel):
-    """A matched pair of inter-account transfers."""
+    """A matched inter-account transfer (1:1 or 1:N split)."""
 
     from_account_id: str = Field(description="Compte source du retrait")
     to_account_id: str = Field(description="Compte destination du dépôt")
-    amount: float = Field(description="Montant du transfert")
+    amount: float = Field(description="Montant du transfert (côté retrait)")
     from_transaction_id: str = Field(description="ID de la transaction retrait")
-    to_transaction_id: str = Field(description="ID de la transaction dépôt")
+    to_transaction_id: str = Field(default="", description="ID de la transaction dépôt (1:1 match)")
+    to_transaction_ids: list[str] = Field(default_factory=list, description="IDs des dépôts (1:N split match)")
     date_delta_days: int = Field(description="Écart en jours entre retrait et dépôt")
     match_score: float = Field(description="Score de correspondance 0-1")
+    is_split: bool = Field(default=False, description="True si transfert fractionné (1:N)")
 
 
 class DPFlag(BaseModel):

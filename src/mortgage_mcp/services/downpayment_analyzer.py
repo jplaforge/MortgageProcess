@@ -29,6 +29,8 @@ from mortgage_mcp.models.downpayment import (
 TRANSFER_AMOUNT_TOLERANCE = 0.005  # 0.5%
 TRANSFER_AMOUNT_ABS_TOLERANCE = 1.0  # ±1$
 TRANSFER_DATE_WINDOW_DAYS = 3
+SPLIT_TRANSFER_AMOUNT_TOLERANCE = 0.02  # 2% for split transfers (looser)
+SPLIT_TRANSFER_DATE_WINDOW_DAYS = 5
 LARGE_DEPOSIT_ABS_THRESHOLD = 5_000
 LARGE_DEPOSIT_RELATIVE_FACTOR = 0.25  # 25% of monthly average
 CASH_KEYWORDS = {"CASH", "COMPTANT", "GUICHET", "ATM", "DEPOT ESPECES", "ESPECES", "DEPOT COMPTANT"}
@@ -48,34 +50,44 @@ def _has_keywords(description: str, keywords: set[str]) -> bool:
     return any(kw in desc_upper for kw in keywords)
 
 
+def _all_transfer_tx_ids(transfers: list[TransferMatch]) -> set[str]:
+    """Collect all transaction IDs involved in matched transfers (1:1 and 1:N)."""
+    ids: set[str] = set()
+    for m in transfers:
+        ids.add(m.from_transaction_id)
+        if m.to_transaction_id:
+            ids.add(m.to_transaction_id)
+        ids.update(m.to_transaction_ids)
+    return ids
+
+
 # ── 1. Transfer matching ─────────────────────────────────────────────────
 
 
 def match_transfers(transactions: list[DPTransaction]) -> list[TransferMatch]:
     """Match inter-account transfer pairs (withdrawal → deposit).
 
-    Uses greedy one-to-one matching by descending score.
+    Two passes:
+    1. Greedy one-to-one matching by descending score.
+    2. Split transfer matching: unmatched withdrawals → multiple deposits summing to ~same amount.
     """
     withdrawals = [t for t in transactions if t.type == TransactionType.WITHDRAWAL]
     deposits = [t for t in transactions if t.type == TransactionType.DEPOSIT]
+
+    # ── Pass 1: 1:1 matching ──────────────────────────────────────────────
 
     candidates: list[tuple[float, DPTransaction, DPTransaction]] = []
 
     for wd in withdrawals:
         for dep in deposits:
-            # Must be different accounts
             if wd.account_id == dep.account_id:
                 continue
-
-            # Amount proximity
             if wd.amount == 0:
                 continue
             amount_diff = abs(wd.amount - dep.amount)
             relative_diff = amount_diff / wd.amount
             if relative_diff > TRANSFER_AMOUNT_TOLERANCE and amount_diff > TRANSFER_AMOUNT_ABS_TOLERANCE:
                 continue
-
-            # Date proximity
             try:
                 wd_date = _parse_date(wd.date)
                 dep_date = _parse_date(dep.date)
@@ -85,20 +97,16 @@ def match_transfers(transactions: list[DPTransaction]) -> list[TransferMatch]:
             if date_delta > TRANSFER_DATE_WINDOW_DAYS:
                 continue
 
-            # Scoring
-            amount_score = max(0, 0.5 - (relative_diff * 10))  # 0-0.5
-            date_score = 0.3 * (1 - date_delta / (TRANSFER_DATE_WINDOW_DAYS + 1))  # 0-0.3
+            amount_score = max(0, 0.5 - (relative_diff * 10))
+            date_score = 0.3 * (1 - date_delta / (TRANSFER_DATE_WINDOW_DAYS + 1))
             keyword_score = 0.0
             if _has_keywords(wd.description, TRANSFER_KEYWORDS) or _has_keywords(dep.description, TRANSFER_KEYWORDS):
                 keyword_score = 0.2
             score = amount_score + date_score + keyword_score
-
             candidates.append((score, wd, dep))
 
-    # Sort by score descending
     candidates.sort(key=lambda x: x[0], reverse=True)
 
-    # Greedy one-to-one matching
     used_wd: set[str] = set()
     used_dep: set[str] = set()
     matches: list[TransferMatch] = []
@@ -108,21 +116,98 @@ def match_transfers(transactions: list[DPTransaction]) -> list[TransferMatch]:
             continue
         used_wd.add(wd.id)
         used_dep.add(dep.id)
-
         try:
             date_delta = abs((_parse_date(dep.date) - _parse_date(wd.date)).days)
         except ValueError:
             date_delta = 0
-
         matches.append(TransferMatch(
             from_account_id=wd.account_id,
             to_account_id=dep.account_id,
             amount=wd.amount,
             from_transaction_id=wd.id,
             to_transaction_id=dep.id,
+            to_transaction_ids=[dep.id],
             date_delta_days=date_delta,
             match_score=round(score, 3),
         ))
+
+    # ── Pass 2: 1:N split transfer matching ───────────────────────────────
+
+    unmatched_wd = [w for w in withdrawals if w.id not in used_wd and w.amount >= 1000]
+    available_dep = [d for d in deposits if d.id not in used_dep]
+
+    for wd in unmatched_wd:
+        if wd.amount == 0:
+            continue
+        try:
+            wd_date = _parse_date(wd.date)
+        except ValueError:
+            continue
+
+        # Only consider deposits on different accounts, within date window, with transfer keywords
+        dep_candidates = []
+        for dep in available_dep:
+            if dep.account_id == wd.account_id:
+                continue
+            try:
+                dep_date = _parse_date(dep.date)
+            except ValueError:
+                continue
+            date_delta = abs((dep_date - wd_date).days)
+            if date_delta > SPLIT_TRANSFER_DATE_WINDOW_DAYS:
+                continue
+            if not (_has_keywords(wd.description, TRANSFER_KEYWORDS) or _has_keywords(dep.description, TRANSFER_KEYWORDS)):
+                continue
+            dep_candidates.append((dep, date_delta))
+
+        if not dep_candidates:
+            continue
+
+        # Try subset-sum: find combination of deposits that sum to ~withdrawal amount
+        # Sort by amount descending for greedy approach
+        dep_candidates.sort(key=lambda x: x[0].amount, reverse=True)
+        selected: list[tuple[DPTransaction, int]] = []
+        remaining = wd.amount
+
+        for dep, delta in dep_candidates:
+            if dep.id in used_dep:
+                continue
+            if dep.amount <= remaining * (1 + SPLIT_TRANSFER_AMOUNT_TOLERANCE):
+                selected.append((dep, delta))
+                remaining -= dep.amount
+                if abs(remaining) <= wd.amount * SPLIT_TRANSFER_AMOUNT_TOLERANCE or remaining <= TRANSFER_AMOUNT_ABS_TOLERANCE:
+                    break
+
+        if not selected:
+            continue
+
+        total_selected = sum(d.amount for d, _ in selected)
+        amount_diff = abs(total_selected - wd.amount)
+        relative_diff = amount_diff / wd.amount if wd.amount > 0 else 1.0
+
+        if relative_diff <= SPLIT_TRANSFER_AMOUNT_TOLERANCE or amount_diff <= TRANSFER_AMOUNT_ABS_TOLERANCE:
+            max_delta = max(delta for _, delta in selected)
+            # Score: lower than 1:1 matches since split is less certain
+            score = 0.3 + (0.2 if relative_diff < 0.005 else 0.1) + (0.1 if max_delta <= 2 else 0.0)
+
+            dep_ids = [d.id for d, _ in selected]
+            to_accounts = {d.account_id for d, _ in selected}
+
+            used_wd.add(wd.id)
+            for d, _ in selected:
+                used_dep.add(d.id)
+
+            matches.append(TransferMatch(
+                from_account_id=wd.account_id,
+                to_account_id=", ".join(sorted(to_accounts)),
+                amount=wd.amount,
+                from_transaction_id=wd.id,
+                to_transaction_id=dep_ids[0],
+                to_transaction_ids=dep_ids,
+                date_delta_days=max_delta,
+                match_score=round(score, 3),
+                is_split=True,
+            ))
 
     return matches
 
@@ -140,7 +225,7 @@ def detect_flags(
     flags: list[DPFlag] = []
 
     deposits = [t for t in transactions if t.type == TransactionType.DEPOSIT]
-    transfer_tx_ids = {m.from_transaction_id for m in transfers} | {m.to_transaction_id for m in transfers}
+    transfer_tx_ids = _all_transfer_tx_ids(transfers)
 
     # Monthly average for relative thresholds
     monthly_totals: dict[str, float] = defaultdict(float)
@@ -290,19 +375,29 @@ def detect_flags(
                     recommended_documents=["Relevés bancaires couvrant au moins 90 jours"],
                 ))
 
-    # Unexplained source: large deposits with category "other" and not matched as transfer
+    # Unexplained source: large deposits with category "other" or unmatched "transfer" category
     for dep in deposits:
-        if (
-            dep.id not in transfer_tx_ids
-            and dep.category == TransactionCategory.OTHER
-            and dep.amount >= LARGE_DEPOSIT_ABS_THRESHOLD
-        ):
+        if dep.id in transfer_tx_ids:
+            continue
+        if dep.amount < LARGE_DEPOSIT_ABS_THRESHOLD:
+            continue
+        if dep.category == TransactionCategory.OTHER:
             flags.append(DPFlag(
                 type=FlagType.UNEXPLAINED_SOURCE,
                 severity=FlagSeverity.CRITICAL,
                 rationale=f"Dépôt de {dep.amount:,.2f} $ le {dep.date} sans source identifiable — {dep.description}",
                 supporting_transaction_ids=[dep.id],
                 recommended_documents=["Preuve de provenance des fonds", "Lettre explicative"],
+            ))
+        elif dep.category == TransactionCategory.TRANSFER:
+            # Transfer-category deposit not matched as inter-account → needs verification
+            flags.append(DPFlag(
+                type=FlagType.UNEXPLAINED_SOURCE,
+                severity=FlagSeverity.WARNING,
+                rationale=f"Dépôt catégorisé comme transfert ({dep.amount:,.2f} $) le {dep.date} "
+                          f"sans retrait correspondant identifié — {dep.description}",
+                supporting_transaction_ids=[dep.id],
+                recommended_documents=["Relevé du compte source montrant le retrait"],
             ))
 
     return flags
@@ -317,7 +412,7 @@ def calculate_source_breakdown(
     target_dp: float,
 ) -> SourceBreakdown:
     """Map transaction categories to source breakdown fields."""
-    transfer_tx_ids = {m.from_transaction_id for m in transfers} | {m.to_transaction_id for m in transfers}
+    transfer_tx_ids = _all_transfer_tx_ids(transfers)
 
     deposits = [
         t for t in transactions
@@ -340,7 +435,10 @@ def calculate_source_breakdown(
             TransactionCategory.BUSINESS_INCOME,
             TransactionCategory.GOVERNMENT,
             TransactionCategory.REFUND,
+            TransactionCategory.TRANSFER,
         ):
+            # Unmatched transfer-category deposits are counted as other_explained
+            # (they represent incoming funds even if source account is unknown)
             other_explained += dep.amount
         # other categories (OTHER, CASH, LOAN, etc.) not counted as explained
 
