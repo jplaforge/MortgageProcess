@@ -138,7 +138,7 @@ async def check_vertex_ai_connection() -> dict:
             "status": "connected",
             "model": settings.gemini_model,
             "location": settings.google_cloud_location,
-            "response": response.text.strip(),
+            "response": (response.text or "").strip(),
         }
     except Exception as exc:
         return {
