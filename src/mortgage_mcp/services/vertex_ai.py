@@ -42,7 +42,11 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
 
 6. **Comptes multiples**: L'emprunteur peut fournir des relevés de PLUSIEURS comptes bancaires (institutions différentes). Tu dois analyser TOUS les documents fournis et inclure les transactions de CHAQUE compte. Combine les données de tous les comptes dans une seule ventilation mensuelle.
 
-7. **Déduplication**: Uniquement au sein d'un MÊME compte, si des captures d'écran ou pages se chevauchent, détecte les transactions en double (même date + même description + même montant + même compte) et ne les inclus qu'une seule fois. NE PAS éliminer des transactions provenant de comptes différents, même si elles ont le même montant ou la même date. Signale les doublons détectés dans `confidence_notes`.
+7. **Déduplication**: Uniquement au sein d'un MÊME compte, si des captures d'écran ou pages se chevauchent:
+   - Un doublon potentiel est défini comme: même date ET même description ET même montant ET même compte. Si les dates diffèrent, ce n'est PAS un doublon.
+   - Ne retire un doublon QUE si tu es certain qu'il s'agit de la même transaction (ex: pages qui se chevauchent dans un même relevé PDF).
+   - En cas de doute, GARDE la transaction et signale-la dans `confidence_notes` avec la mention "Doublon potentiel".
+   - NE PAS éliminer des transactions provenant de comptes différents, même si elles ont le même montant ou la même date.
 
 8. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
    - Dépôts inhabituellement élevés
@@ -50,7 +54,7 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
    - Transferts ambigus entre revenus et transferts personnels
    - Périodes sans activité
    - Qualité des documents (illisible, pages manquantes, etc.)
-   - Transactions en double détectées et retirées
+   - Doublons potentiels détectés (signaler, ne pas retirer sauf si certain)
 
 IMPORTANT:
 - Tous les montants en dollars canadiens (CAD)
