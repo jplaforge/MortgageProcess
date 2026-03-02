@@ -35,8 +35,10 @@ class TestGenerateExcel:
         assert ws["B3"].value == "Jean Tremblay"
         assert ws["B4"].value == "Desjardins"
         assert ws["B7"].value == 3
-        assert ws["B11"].value == 18700.00
-        assert ws["B14"].value == 74800.00
+        # B11 is now a formula referencing Detail mensuel's TOTAL row
+        assert "Detail mensuel" in str(ws["B11"].value)
+        # B14 is now a formula: B13 * 12
+        assert "*12" in str(ws["B14"].value)
 
     def test_monthly_sheet_rows(self, sample_extraction):
         data = generate_excel(sample_extraction)
@@ -49,9 +51,9 @@ class TestGenerateExcel:
         assert ws.cell(row=2, column=1).value == "2025-01"
         assert ws.cell(row=3, column=1).value == "2025-02"
         assert ws.cell(row=4, column=1).value == "2025-03"
-        # Business deposits
-        assert ws.cell(row=2, column=3).value == 6000.00
-        assert ws.cell(row=3, column=3).value == 5500.00
+        # Col C (Dépôts affaires) is now a SUMPRODUCT formula
+        assert "SUMPRODUCT" in str(ws.cell(row=2, column=3).value)
+        assert "SUMPRODUCT" in str(ws.cell(row=3, column=3).value)
 
     def test_monthly_sheet_formulas(self, sample_extraction):
         data = generate_excel(sample_extraction)
@@ -162,7 +164,7 @@ class TestGenerateExcel:
         wb = load_workbook(io.BytesIO(data))
         ws = wb["Detail mensuel"]
 
-        # Column D = "Transferts personnels"
+        # Column D = "Transferts personnels" (static values)
         assert ws.cell(row=1, column=4).value == "Transferts personnels"
         assert ws.cell(row=2, column=4).value == 2000.00  # Jan
         assert ws.cell(row=3, column=4).value == 1000.00  # Feb
@@ -175,3 +177,132 @@ class TestGenerateExcel:
         import base64
         decoded = base64.b64decode(result)
         assert decoded[:2] == b"PK"  # ZIP/XLSX magic bytes
+
+
+class TestBrokerFeatures:
+    """Tests for broker-facing improvements."""
+
+    def test_deposits_inclure_column_header(self, sample_extraction):
+        """Dépôts sheet should have 'Inclure (O/N)' column F."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Depots"]
+
+        assert ws.cell(row=1, column=6).value == "Inclure (O/N)"
+
+    def test_deposits_inclure_defaults(self, sample_extraction):
+        """Business income deposits default to O; others default to N."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Depots"]
+
+        for row in range(2, ws.max_row + 1):
+            cat = ws.cell(row=row, column=5).value
+            inclure = ws.cell(row=row, column=6).value
+            if cat is None:
+                break
+            if cat == "business_income":
+                assert inclure == "O", f"Row {row}: business_income should be O"
+            else:
+                assert inclure == "N", f"Row {row}: {cat} should be N"
+
+    def test_deposits_broker_explanation_column(self, sample_extraction):
+        """Dépôts sheet should have 'Explication courtier' column G."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Depots"]
+
+        assert ws.cell(row=1, column=7).value == "Explication courtier"
+
+    def test_deposits_autofilter(self, sample_extraction):
+        """Dépôts sheet should have AutoFilter set."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Depots"]
+
+        assert ws.auto_filter.ref is not None
+
+    def test_deposits_frozen_pane(self, sample_extraction):
+        """Dépôts sheet should have frozen pane at A2."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Depots"]
+
+        assert ws.freeze_panes == "A2"
+
+    def test_withdrawals_commentaire_column(self, sample_extraction):
+        """Retraits sheet should have 'Commentaire courtier' column F."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Retraits"]
+
+        assert ws.cell(row=1, column=6).value == "Commentaire courtier"
+
+    def test_withdrawals_autofilter(self, sample_extraction):
+        """Retraits sheet should have AutoFilter set."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Retraits"]
+
+        assert ws.auto_filter.ref is not None
+
+    def test_monthly_frozen_pane(self, sample_extraction):
+        """Detail mensuel should have frozen pane at A2."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Detail mensuel"]
+
+        assert ws.freeze_panes == "A2"
+
+    def test_monthly_business_deposits_formula(self, sample_extraction):
+        """Detail mensuel col C data rows should use SUMPRODUCT referencing Dépôts."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Detail mensuel"]
+
+        for row in range(2, len(sample_extraction.monthly_breakdown) + 2):
+            val = ws.cell(row=row, column=3).value
+            assert "SUMPRODUCT" in str(val), f"Row {row} col C should be SUMPRODUCT formula"
+            assert "Depots" in str(val), f"Row {row} col C should reference Depots sheet"
+
+    def test_monthly_revenu_net_formula(self, sample_extraction):
+        """Detail mensuel col J data rows should use =C-I formula."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Detail mensuel"]
+
+        for i, row in enumerate(range(2, len(sample_extraction.monthly_breakdown) + 2), start=2):
+            val = ws.cell(row=row, column=10).value
+            assert f"=C{row}-I{row}" == val, f"Row {row} col J should be =C{row}-I{row}"
+
+    def test_resume_formula_chain(self, sample_extraction):
+        """Resume B11 and B14 should contain formula references."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Resume"]
+
+        # B11 = Revenu d'affaires total → references Detail mensuel TOTAL row
+        assert "Detail mensuel" in str(ws["B11"].value)
+        # B13 = Revenu mensuel moyen → references Detail mensuel MOYENNE row
+        assert "Detail mensuel" in str(ws["B13"].value)
+        # B14 = Revenu annualisé → B13 * 12
+        assert "*12" in str(ws["B14"].value)
+
+    def test_resume_broker_sections(self, sample_extraction):
+        """Resume should contain broker input sections."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Resume"]
+
+        all_values = [cell.value for row in ws.iter_rows() for cell in row if cell.value]
+        assert any("Informations du dossier" in str(v) for v in all_values)
+        assert any("Revenu qualifiable" in str(v) for v in all_values)
+        assert any("Attestation du courtier" in str(v) for v in all_values)
+
+    def test_resume_frozen_pane(self, sample_extraction):
+        """Resume should have frozen pane at A2."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Resume"]
+
+        assert ws.freeze_panes == "A2"
