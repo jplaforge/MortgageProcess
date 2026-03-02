@@ -40,9 +40,11 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
 
 5. **Totaux**: Calcule le revenu d'affaires total, le revenu mensuel moyen, et le revenu annualisé (moyenne × 12).
 
-6. **Déduplication**: Lorsque plusieurs documents ou captures d'écran couvrent des périodes qui se chevauchent, détecte les transactions en double (même date + même description + même montant) et ne les inclus qu'une seule fois. Signale les doublons détectés dans `confidence_notes`.
+6. **Comptes multiples**: L'emprunteur peut fournir des relevés de PLUSIEURS comptes bancaires (institutions différentes). Tu dois analyser TOUS les documents fournis et inclure les transactions de CHAQUE compte. Combine les données de tous les comptes dans une seule ventilation mensuelle.
 
-7. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
+7. **Déduplication**: Uniquement au sein d'un MÊME compte, si des captures d'écran ou pages se chevauchent, détecte les transactions en double (même date + même description + même montant + même compte) et ne les inclus qu'une seule fois. NE PAS éliminer des transactions provenant de comptes différents, même si elles ont le même montant ou la même date. Signale les doublons détectés dans `confidence_notes`.
+
+8. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
    - Dépôts inhabituellement élevés
    - Revenus irréguliers
    - Transferts ambigus entre revenus et transferts personnels
@@ -56,6 +58,8 @@ IMPORTANT:
 - Les mois en format YYYY-MM
 - Sois conservateur: en cas de doute sur la catégorie d'un dépôt, classe-le comme `other` et ajoute une note
 - Un travailleur autonome typique reçoit des paiements de clients variés par virement, chèque ou Interac
+- Si les relevés proviennent de plusieurs institutions, indique toutes les institutions séparées par " / " dans le champ institution (ex: "Banque Boréale / Caisse Laurentienne")
+- Analyse TOUS les documents fournis sans en ignorer aucun
 """
 
 
