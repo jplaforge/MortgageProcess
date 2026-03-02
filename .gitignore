@@ -11,6 +11,7 @@ build/
 .env
 sa-key.json
 *.credentials.json
+realai-*.json
 
 .venv/
 venv/
