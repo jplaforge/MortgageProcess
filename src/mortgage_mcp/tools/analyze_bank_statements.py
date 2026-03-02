@@ -11,6 +11,11 @@ from mortgage_mcp.services.vertex_ai import extract_bank_statements
 def _format_summary(extraction) -> str:
     """Build a human-readable French summary of the extraction."""
     info = extraction.account_info
+    # Calculate total personal transfers across all months
+    total_personal_transfers = sum(
+        m.personal_transfers for m in extraction.monthly_breakdown
+    )
+
     lines = [
         "# Analyse des relevés bancaires — Travailleur autonome",
         "",
@@ -25,6 +30,7 @@ def _format_summary(extraction) -> str:
         f"|----------|---------|",
         f"| Dépôts totaux | {extraction.total_deposits:,.2f} $ |",
         f"| Revenu d'affaires total | {extraction.total_business_income:,.2f} $ |",
+        f"| Transferts inter-comptes exclus | {total_personal_transfers:,.2f} $ |",
         f"| Retraits totaux | {extraction.total_withdrawals:,.2f} $ |",
         f"| Revenu mensuel moyen (affaires) | {extraction.average_monthly_business_income:,.2f} $ |",
         f"| **Revenu annualisé (affaires)** | **{extraction.annualized_business_income:,.2f} $** |",
@@ -34,14 +40,34 @@ def _format_summary(extraction) -> str:
     if extraction.monthly_breakdown:
         lines.append("## Ventilation mensuelle")
         lines.append("")
-        lines.append("| Mois | Dépôts affaires | Retraits | Nb dépôts |")
-        lines.append("|------|-----------------|----------|-----------|")
+        lines.append("| Mois | Dépôts affaires | Transferts | Retraits | Nb dépôts |")
+        lines.append("|------|-----------------|------------|----------|-----------|")
         for m in extraction.monthly_breakdown:
             lines.append(
                 f"| {m.month} | {m.business_deposits:,.2f} $ | "
+                f"{m.personal_transfers:,.2f} $ | "
                 f"{m.total_withdrawals:,.2f} $ | {m.deposit_count} |"
             )
         lines.append("")
+
+    if total_personal_transfers > 0:
+        lines.append("## Transferts inter-comptes")
+        lines.append("")
+        lines.append(
+            f"**{total_personal_transfers:,.2f} $** en transferts entre comptes de l'emprunteur "
+            "ont été détectés et **exclus** du revenu d'affaires."
+        )
+        lines.append("")
+        # List transfer-related confidence notes
+        transfer_notes = [
+            n for n in (extraction.confidence_notes or [])
+            if "transfert inter-comptes" in n.lower()
+        ]
+        if transfer_notes:
+            lines.append("Détails:")
+            for note in transfer_notes:
+                lines.append(f"- {note}")
+            lines.append("")
 
     if extraction.nsf_events:
         lines.append("## Indicateurs de risque")

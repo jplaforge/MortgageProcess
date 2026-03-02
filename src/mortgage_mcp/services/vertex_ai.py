@@ -20,7 +20,7 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
    - Le montant
    - La catégorie:
      * `business_income`: Revenus d'entreprise, paiements de clients, virements Interac de clients, honoraires professionnels, revenus de contrats
-     * `personal_transfer`: Transferts personnels entre comptes, virements d'un conjoint/famille
+     * `personal_transfer`: Transferts personnels entre comptes, virements d'un conjoint/famille, **ET transferts inter-comptes de l'emprunteur** (voir section 7)
      * `government`: Crédits TPS/TVH, remboursements d'impôt, prestations gouvernementales
      * `loan_credit`: Prêts, marges de crédit, avances
      * `refund`: Remboursements de fournisseurs, retours
@@ -32,7 +32,7 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
 4. **Ventilation mensuelle**: Pour chaque mois, calcule:
    - `total_deposits`: somme de tous les dépôts
    - `business_deposits`: somme des dépôts `business_income`
-   - `personal_transfers`: somme des dépôts `personal_transfer`
+   - `personal_transfers`: somme des dépôts `personal_transfer` (incluant les transferts inter-comptes détectés)
    - `government_deposits`: somme des dépôts `government`
    - `refund_deposits`: somme des dépôts `refund`
    - `loan_credit_deposits`: somme des dépôts `loan_credit`
@@ -42,8 +42,18 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
 5. **Totaux**: Calcule le revenu d'affaires total, le revenu mensuel moyen, et le revenu annualisé (moyenne × 12).
 
 6. **Comptes multiples**: L'emprunteur peut fournir des relevés de PLUSIEURS comptes bancaires (institutions différentes). Tu dois analyser TOUS les documents fournis et inclure les transactions de CHAQUE compte. Combine les données de tous les comptes dans une seule ventilation mensuelle.
+   ⚠️ ATTENTION: Un transfert entre les propres comptes de l'emprunteur N'EST PAS un revenu. Le retrait sur le compte A et le dépôt correspondant sur le compte B représentent le MÊME argent qui se déplace — il ne faut pas le compter comme revenu d'affaires. Voir section 7 pour les règles de détection.
 
-7. **Déduplication**: Uniquement au sein d'un MÊME compte, si des captures d'écran ou pages se chevauchent:
+7. **Transferts inter-comptes** (CRITIQUE pour comptes multiples):
+   Quand l'emprunteur fournit des relevés de plusieurs comptes, tu DOIS détecter les transferts entre ses propres comptes pour éviter le double-comptage:
+   - Compare chaque retrait du compte A avec les dépôts du compte B (et vice-versa)
+   - Un transfert inter-comptes est identifié quand: même date (±1 jour ouvrable) ET montant similaire (±5%)
+   - Mots-clés indicateurs: "VIREMENT", "TRANSFERT", "VIR INTERAC", "TFR", "TRANSFER", "VIR"
+   - Catégorise le DÉPÔT correspondant comme `personal_transfer` (PAS comme `business_income`)
+   - Ajoute une note de confiance pour chaque transfert inter-comptes détecté, ex: "Transfert inter-comptes détecté: retrait de 2 000 $ sur Boréale XX89 (2025-01-15) → dépôt de 2 000 $ sur Laurentienne XX77 (2025-01-15)"
+   - **En cas de doute, catégorise comme `personal_transfer`** — il est préférable de sous-estimer le revenu que de le gonfler pour une demande hypothécaire
+
+8. **Déduplication**: Uniquement au sein d'un MÊME compte, si des captures d'écran ou pages se chevauchent:
    - Un doublon potentiel est défini comme: même date ET même description ET même montant ET même compte. Si les dates diffèrent, ce n'est PAS un doublon.
    - Ne retire un doublon QUE si tu es certain qu'il s'agit de la même transaction (ex: pages qui se chevauchent dans un même relevé PDF).
    - En cas de doute, GARDE la transaction et signale-la dans `confidence_notes` avec la mention "Doublon potentiel".
@@ -62,10 +72,11 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
       Calcule le total mensuel de toutes les obligations récurrentes identifiées.
       Note: une obligation récurrente doit apparaître au moins 2 fois sur la période analysée.
 
-8. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
+11. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
    - Dépôts inhabituellement élevés
    - Revenus irréguliers
    - Transferts ambigus entre revenus et transferts personnels
+   - Transferts inter-comptes détectés (avec détails: comptes, dates, montants)
    - Périodes sans activité
    - Qualité des documents (illisible, pages manquantes, etc.)
    - Doublons potentiels détectés (signaler, ne pas retirer sauf si certain)
@@ -78,6 +89,7 @@ IMPORTANT:
 - Un travailleur autonome typique reçoit des paiements de clients variés par virement, chèque ou Interac
 - Si les relevés proviennent de plusieurs institutions, indique toutes les institutions séparées par " / " dans le champ institution (ex: "Banque Boréale / Caisse Laurentienne")
 - Analyse TOUS les documents fournis sans en ignorer aucun
+- Les transferts entre les propres comptes de l'emprunteur ne sont PAS des revenus — catégorise-les comme `personal_transfer`
 """
 
 

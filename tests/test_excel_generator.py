@@ -156,6 +156,18 @@ class TestGenerateExcel:
                 break
         assert found_obligations, "Obligations section not found"
 
+    def test_monthly_transfers_column(self, sample_extraction):
+        """Detail mensuel column D should reflect personal_transfers values from each month."""
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Detail mensuel"]
+
+        # Column D = "Transferts personnels"
+        assert ws.cell(row=1, column=4).value == "Transferts personnels"
+        assert ws.cell(row=2, column=4).value == 2000.00  # Jan
+        assert ws.cell(row=3, column=4).value == 1000.00  # Feb
+        assert ws.cell(row=4, column=4).value == 1500.00  # Mar
+
     def test_base64_output(self, sample_extraction):
         result = generate_excel_base64(sample_extraction)
         assert isinstance(result, str)

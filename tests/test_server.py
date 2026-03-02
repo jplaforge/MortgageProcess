@@ -20,10 +20,11 @@ def mock_ctx():
 
 class TestServerToolRegistration:
     def test_tools_registered(self):
-        """Verify both tools are registered on the MCP server."""
+        """Verify all tools are registered on the MCP server."""
         tools = mcp._tool_manager._tools
         tool_names = list(tools.keys())
         assert "analyze_bank_statements" in tool_names
+        assert "audit_downpayment" in tool_names
         assert "health_check" in tool_names
 
     def test_analyze_tool_has_description(self):
@@ -35,6 +36,15 @@ class TestServerToolRegistration:
         tools = mcp._tool_manager._tools
         tool = tools["health_check"]
         assert "vertex ai" in tool.description.lower() or "statut" in tool.description.lower()
+
+    def test_audit_downpayment_registered(self):
+        tools = mcp._tool_manager._tools
+        assert "audit_downpayment" in tools
+
+    def test_audit_downpayment_description(self):
+        tools = mcp._tool_manager._tools
+        tool = tools["audit_downpayment"]
+        assert "mise de fonds" in tool.description.lower()
 
 
 class TestAnalyzeBankStatementsTool:

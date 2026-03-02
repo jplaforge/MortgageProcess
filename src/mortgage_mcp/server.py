@@ -40,9 +40,11 @@ _use_auth = bool(settings.mcp_auth_token)
 mcp = FastMCP(
     "WelcomeSpaces Mortgage Analyzer",
     instructions=(
-        "Ce serveur analyse les relevés bancaires de travailleurs autonomes "
-        "pour calculer le revenu admissible aux fins d'une demande de prêt hypothécaire. "
-        "Envoyez des relevés bancaires en base64 via l'outil analyze_bank_statements."
+        "Ce serveur offre deux outils d'analyse hypothécaire:\n"
+        "1. analyze_bank_statements — Analyse les relevés bancaires de travailleurs autonomes "
+        "pour calculer le revenu admissible.\n"
+        "2. audit_downpayment — Audite la provenance de la mise de fonds: "
+        "trace les transferts, détecte les dépôts suspects, et génère un dossier d'audit complet."
     ),
     host="0.0.0.0",
     port=port,
@@ -92,6 +94,54 @@ async def analyze_bank_statements(
     )
 
     return await _analyze(documents, ctx, borrower_name, business_name, business_type)
+
+
+@mcp.tool(
+    title="Auditer la mise de fonds",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def audit_downpayment(
+    documents: list[dict],
+    target_downpayment_amount: float,
+    closing_date: str,
+    borrower_name: str,
+    ctx: Context,
+    supporting_documents: list[dict] | None = None,
+    co_borrower_name: str | None = None,
+    deal_notes: str | None = None,
+) -> list:
+    """Audite la provenance de la mise de fonds pour un dossier hypothécaire.
+
+    Analyse les relevés bancaires pour tracer chaque dollar: transferts inter-comptes,
+    dépôts en espèces, dons, et sources non expliquées. Génère un dossier d'audit complet.
+
+    Args:
+        documents: Relevés bancaires encodés en base64. Chaque élément doit avoir:
+            - data: contenu du fichier en base64
+            - mime_type: type MIME (application/pdf, image/jpeg, image/png, text/csv)
+        target_downpayment_amount: Montant cible de la mise de fonds en CAD.
+        closing_date: Date de clôture prévue (YYYY-MM-DD).
+        borrower_name: Nom de l'emprunteur.
+        supporting_documents: Documents justificatifs optionnels (lettres de don, etc.).
+        co_borrower_name: Nom du co-emprunteur (optionnel).
+        deal_notes: Notes sur le dossier (optionnel).
+
+    Returns:
+        Résumé textuel en français + JSON structuré + fichier Excel d'audit.
+    """
+    from mortgage_mcp.tools.downpayment_audit import (
+        audit_downpayment as _audit,
+    )
+
+    return await _audit(
+        documents, target_downpayment_amount, closing_date, borrower_name, ctx,
+        supporting_documents, co_borrower_name, deal_notes,
+    )
 
 
 @mcp.tool(
