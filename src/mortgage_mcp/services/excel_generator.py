@@ -212,7 +212,7 @@ def _fill_deposits(wb, extraction: BankStatementExtraction) -> None:
         for cell in row:
             cell.value = None
 
-    headers = ["Date", "Description", "Montant", "Catégorie"]
+    headers = ["Date", "Compte", "Description", "Montant", "Catégorie"]
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _apply_header_style(ws, 1, len(headers))
@@ -221,15 +221,17 @@ def _fill_deposits(wb, extraction: BankStatementExtraction) -> None:
     for month in extraction.monthly_breakdown:
         for dep in month.deposits:
             ws.cell(row=row_num, column=1, value=dep.date).border = THIN_BORDER
-            ws.cell(row=row_num, column=2, value=dep.description).border = THIN_BORDER
-            cell_amt = ws.cell(row=row_num, column=3, value=dep.amount)
+            ws.cell(row=row_num, column=2, value=dep.account).border = THIN_BORDER
+            ws.cell(row=row_num, column=3, value=dep.description).border = THIN_BORDER
+            cell_amt = ws.cell(row=row_num, column=4, value=dep.amount)
             cell_amt.number_format = CURRENCY_FORMAT
             cell_amt.border = THIN_BORDER
-            ws.cell(row=row_num, column=4, value=dep.category.value).border = THIN_BORDER
+            ws.cell(row=row_num, column=5, value=dep.category.value).border = THIN_BORDER
             row_num += 1
 
     # Column widths
     ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 50
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 20

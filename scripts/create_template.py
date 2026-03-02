@@ -91,15 +91,16 @@ def main() -> None:
     # --- Sheet 3: Depots ---
     ws_deposits = wb.create_sheet("Depots")
 
-    deposit_headers = ["Date", "Description", "Montant", "Catégorie"]
+    deposit_headers = ["Date", "Compte", "Description", "Montant", "Catégorie"]
     for col, header in enumerate(deposit_headers, 1):
         ws_deposits.cell(row=1, column=col, value=header)
     apply_header(ws_deposits, 1, len(deposit_headers))
 
     ws_deposits.column_dimensions["A"].width = 14
-    ws_deposits.column_dimensions["B"].width = 50
-    ws_deposits.column_dimensions["C"].width = 16
-    ws_deposits.column_dimensions["D"].width = 20
+    ws_deposits.column_dimensions["B"].width = 24
+    ws_deposits.column_dimensions["C"].width = 50
+    ws_deposits.column_dimensions["D"].width = 16
+    ws_deposits.column_dimensions["E"].width = 20
 
     wb.save(OUTPUT)
     print(f"Template created: {OUTPUT}")

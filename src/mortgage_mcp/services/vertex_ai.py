@@ -25,8 +25,9 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
      * `loan_credit`: Prêts, marges de crédit, avances
      * `refund`: Remboursements de fournisseurs, retours
      * `other`: Tout autre dépôt non classifiable
+   - Le compte source (`account`): identifiant court du compte bancaire d'où provient la transaction, au format "Institution XX99" (ex: "Desjardins XX43", "Banque Boréale XX12"). Utilise le nom abrégé de l'institution + les 2-4 derniers chiffres du compte.
 
-3. **Retraits**: Pour CHAQUE retrait significatif, identifie la date, description, montant et catégorie de dépense.
+3. **Retraits**: Pour CHAQUE retrait significatif, identifie la date, description, montant, catégorie de dépense, et le compte source (`account`) au même format que pour les dépôts.
 
 4. **Ventilation mensuelle**: Pour chaque mois, calcule:
    - `total_deposits`: somme de tous les dépôts

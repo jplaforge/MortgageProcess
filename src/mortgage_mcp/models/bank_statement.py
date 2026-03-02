@@ -24,6 +24,7 @@ class Deposit(BaseModel):
     description: str = Field(description="Transaction description as shown on statement")
     amount: float = Field(description="Deposit amount in CAD")
     category: DepositCategory = Field(description="Categorization of the deposit source")
+    account: str = Field(default="", description="Source account identifier (e.g. 'Desjardins XX43')")
 
 
 class Withdrawal(BaseModel):
@@ -31,6 +32,7 @@ class Withdrawal(BaseModel):
     description: str = Field(description="Transaction description as shown on statement")
     amount: float = Field(description="Withdrawal amount in CAD (positive number)")
     category: str = Field(description="Expense category (e.g. rent, supplies, telecom)")
+    account: str = Field(default="", description="Source account identifier (e.g. 'Desjardins XX43')")
 
 
 class MonthlyBreakdown(BaseModel):
