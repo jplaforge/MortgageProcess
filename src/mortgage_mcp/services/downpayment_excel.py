@@ -563,6 +563,7 @@ def _fill_detail(ws, result: DPAuditResult) -> None:
 
     headers = ["Date", "Compte", "Description", "Montant", "Catégorie", "Drapeaux",
                "Explication du courtier", "Document reçu ✓"]
+    header_row = row
     for col, h in enumerate(headers, 1):
         ws.cell(row=row, column=col, value=h)
     _apply_header_style(ws, row, len(headers))
@@ -620,6 +621,9 @@ def _fill_detail(ws, result: DPAuditResult) -> None:
         cell_h.border = THIN_BORDER
 
         row += 1
+
+    # AutoFilter on the full transaction table
+    ws.auto_filter.ref = f"A{header_row}:H{row - 1}"
 
     _set_col_widths(ws, {"A": 18, "B": 28, "C": 45, "D": 16, "E": 18, "F": 30, "G": 35, "H": 18})
 
