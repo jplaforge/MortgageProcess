@@ -138,11 +138,14 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
 
     headers = [
         "Mois", "Dépôts bruts", "Dépôts affaires", "Transferts personnels",
-        "Gouvernement", "Autres", "Retraits", "Revenu net", "Nb dépôts",
+        "Gouvernement", "Remboursements", "Prêts/crédit", "Autres",
+        "Retraits", "Revenu net", "Nb dépôts",
     ]
     for col, header in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=header)
     _apply_header_style(ws, 1, len(headers))
+
+    currency_cols = len(headers) - 1  # all except last (Nb dépôts)
 
     for i, month in enumerate(extraction.monthly_breakdown, start=2):
         net = month.business_deposits - month.total_withdrawals
@@ -152,6 +155,8 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
             month.business_deposits,
             month.personal_transfers,
             month.government_deposits,
+            month.refund_deposits,
+            month.loan_credit_deposits,
             month.other_deposits,
             month.total_withdrawals,
             net,
@@ -160,7 +165,7 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
         for col, val in enumerate(row_data, 1):
             cell = ws.cell(row=i, column=col, value=val)
             cell.border = THIN_BORDER
-            if col >= 2 and col <= 8:
+            if 2 <= col <= currency_cols:
                 cell.number_format = CURRENCY_FORMAT
 
     # Summary rows
@@ -170,7 +175,7 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
         last_data_row = n + 1
 
         ws.cell(row=summary_row, column=1, value="TOTAL").font = HEADER_FONT
-        for col in range(2, 9):
+        for col in range(2, currency_cols + 1):
             col_letter = chr(64 + col)
             cell = ws.cell(
                 row=summary_row, column=col,
@@ -182,7 +187,7 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
 
         avg_row = summary_row + 1
         ws.cell(row=avg_row, column=1, value="MOYENNE").font = HEADER_FONT
-        for col in range(2, 9):
+        for col in range(2, currency_cols + 1):
             col_letter = chr(64 + col)
             cell = ws.cell(
                 row=avg_row, column=col,
@@ -193,7 +198,7 @@ def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
             cell.border = THIN_BORDER
 
     # Column widths
-    widths = [12, 16, 16, 20, 16, 14, 16, 16, 12]
+    widths = [12, 16, 16, 20, 16, 18, 16, 14, 16, 16, 12]
     for i, w in enumerate(widths):
         ws.column_dimensions[chr(65 + i)].width = w
 

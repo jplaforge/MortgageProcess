@@ -28,16 +28,27 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
 
 3. **Retraits**: Pour CHAQUE retrait significatif, identifie la date, description, montant et catégorie de dépense.
 
-4. **Ventilation mensuelle**: Pour chaque mois, calcule les totaux par catégorie de dépôt et le total des retraits.
+4. **Ventilation mensuelle**: Pour chaque mois, calcule:
+   - `total_deposits`: somme de tous les dépôts
+   - `business_deposits`: somme des dépôts `business_income`
+   - `personal_transfers`: somme des dépôts `personal_transfer`
+   - `government_deposits`: somme des dépôts `government`
+   - `refund_deposits`: somme des dépôts `refund`
+   - `loan_credit_deposits`: somme des dépôts `loan_credit`
+   - `other_deposits`: somme des dépôts `other` uniquement
+   - `total_withdrawals`: somme de tous les retraits
 
 5. **Totaux**: Calcule le revenu d'affaires total, le revenu mensuel moyen, et le revenu annualisé (moyenne × 12).
 
-6. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
+6. **Déduplication**: Lorsque plusieurs documents ou captures d'écran couvrent des périodes qui se chevauchent, détecte les transactions en double (même date + même description + même montant) et ne les inclus qu'une seule fois. Signale les doublons détectés dans `confidence_notes`.
+
+7. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
    - Dépôts inhabituellement élevés
    - Revenus irréguliers
    - Transferts ambigus entre revenus et transferts personnels
    - Périodes sans activité
    - Qualité des documents (illisible, pages manquantes, etc.)
+   - Transactions en double détectées et retirées
 
 IMPORTANT:
 - Tous les montants en dollars canadiens (CAD)

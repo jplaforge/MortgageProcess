@@ -77,13 +77,14 @@ def main() -> None:
 
     monthly_headers = [
         "Mois", "Dépôts bruts", "Dépôts affaires", "Transferts personnels",
-        "Gouvernement", "Autres", "Retraits", "Revenu net", "Nb dépôts",
+        "Gouvernement", "Remboursements", "Prêts/crédit", "Autres",
+        "Retraits", "Revenu net", "Nb dépôts",
     ]
     for col, header in enumerate(monthly_headers, 1):
         ws_monthly.cell(row=1, column=col, value=header)
     apply_header(ws_monthly, 1, len(monthly_headers))
 
-    widths = [12, 16, 16, 20, 16, 14, 16, 16, 12]
+    widths = [12, 16, 16, 20, 16, 18, 16, 14, 16, 16, 12]
     for i, w in enumerate(widths):
         ws_monthly.column_dimensions[chr(65 + i)].width = w
 
