@@ -6,6 +6,8 @@ from mcp.server.fastmcp import FastMCP
 
 from mortgage_mcp.config import settings
 
+port = int(os.environ.get("PORT", settings.port))
+
 mcp = FastMCP(
     "WelcomeSpaces Mortgage Analyzer",
     instructions=(
@@ -13,6 +15,8 @@ mcp = FastMCP(
         "pour calculer le revenu admissible aux fins d'une demande de prêt hypothécaire. "
         "Envoyez des relevés bancaires en base64 via l'outil analyze_bank_statements."
     ),
+    host="0.0.0.0",
+    port=port,
 )
 
 
@@ -57,14 +61,7 @@ async def health_check() -> str:
 def main() -> None:
     settings.setup_gcp_credentials()
 
-    port = int(os.environ.get("PORT", settings.port))
-    host = "0.0.0.0"
-
-    mcp.run(
-        transport="streamable-http",
-        host=host,
-        port=port,
-    )
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":
