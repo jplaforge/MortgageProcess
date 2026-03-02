@@ -3,11 +3,15 @@
 import os
 
 from mcp.server.auth.provider import AccessToken, TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from pydantic import AnyHttpUrl
 
 from mortgage_mcp.config import settings
 
 port = int(os.environ.get("PORT", settings.port))
+
+RENDER_URL = "https://mcp-mortgageprocess.onrender.com"
 
 
 class BearerTokenVerifier(TokenVerifier):
@@ -21,7 +25,7 @@ class BearerTokenVerifier(TokenVerifier):
         return AccessToken(token=token, client_id="mcp-client", scopes=[])
 
 
-token_verifier = BearerTokenVerifier() if settings.mcp_auth_token else None
+_use_auth = bool(settings.mcp_auth_token)
 
 mcp = FastMCP(
     "WelcomeSpaces Mortgage Analyzer",
@@ -32,7 +36,11 @@ mcp = FastMCP(
     ),
     host="0.0.0.0",
     port=port,
-    token_verifier=token_verifier,
+    auth=AuthSettings(
+        issuer_url=AnyHttpUrl(RENDER_URL),
+        resource_server_url=AnyHttpUrl(RENDER_URL),
+    ) if _use_auth else None,
+    token_verifier=BearerTokenVerifier() if _use_auth else None,
 )
 
 
