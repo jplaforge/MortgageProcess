@@ -71,7 +71,12 @@ async def test_with_mcp_client(url: str, token: str | None, pdf_path: str | None
                 if hasattr(content, "text"):
                     print(content.text[:500])
                 elif hasattr(content, "resource"):
-                    print(f"  [Excel file: {content.resource.uri}]")
+                    uri = str(content.resource.uri)
+                    filename = uri.split("///")[-1] if "///" in uri else "output.xlsx"
+                    excel_bytes = base64.b64decode(content.resource.blob)
+                    out_path = Path(filename)
+                    out_path.write_bytes(excel_bytes)
+                    print(f"  Excel saved: {out_path.resolve()} ({len(excel_bytes)} bytes)")
             print()
 
 
