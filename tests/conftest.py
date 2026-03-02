@@ -8,6 +8,8 @@ from mortgage_mcp.models.bank_statement import (
     Deposit,
     DepositCategory,
     MonthlyBreakdown,
+    NSFEvent,
+    RecurringObligation,
     Withdrawal,
 )
 
@@ -101,7 +103,20 @@ def sample_extraction() -> BankStatementExtraction:
                         category=DepositCategory.GOVERNMENT,
                     ),
                 ],
-                withdrawals=[],
+                withdrawals=[
+                    Withdrawal(
+                        date="2025-02-01",
+                        description="PAIEMENT HYPOTHEQUE",
+                        amount=1200.00,
+                        category="hypotheque",
+                    ),
+                    Withdrawal(
+                        date="2025-02-15",
+                        description="BELL MOBILITE",
+                        amount=85.00,
+                        category="telecom",
+                    ),
+                ],
             ),
             MonthlyBreakdown(
                 month="2025-03",
@@ -134,7 +149,20 @@ def sample_extraction() -> BankStatementExtraction:
                         category=DepositCategory.GOVERNMENT,
                     ),
                 ],
-                withdrawals=[],
+                withdrawals=[
+                    Withdrawal(
+                        date="2025-03-01",
+                        description="PAIEMENT HYPOTHEQUE",
+                        amount=1200.00,
+                        category="hypotheque",
+                    ),
+                    Withdrawal(
+                        date="2025-03-10",
+                        description="ASSURANCE AUTO",
+                        amount=150.00,
+                        category="assurance",
+                    ),
+                ],
             ),
         ],
         total_business_income=18700.00,

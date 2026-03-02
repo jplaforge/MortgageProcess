@@ -1,5 +1,6 @@
 """Bank statement analysis tool — orchestrates parsing, AI extraction, and Excel generation."""
 
+from mcp.server.fastmcp import Context
 from mcp.types import EmbeddedResource, TextContent, BlobResourceContents
 
 from mortgage_mcp.services.document_parser import DocumentParseError, parse_documents
@@ -42,6 +43,29 @@ def _format_summary(extraction) -> str:
             )
         lines.append("")
 
+    if extraction.nsf_events:
+        lines.append("## Indicateurs de risque")
+        lines.append("")
+        lines.append(f"**Événements NSF/découverts:** {len(extraction.nsf_events)}")
+        lines.append(f"**Frais NSF totaux:** {extraction.nsf_total_fees:,.2f} $")
+        lines.append("")
+        lines.append("| Date | Description | Montant |")
+        lines.append("|------|-------------|---------|")
+        for nsf in extraction.nsf_events:
+            lines.append(f"| {nsf.date} | {nsf.description} | {nsf.amount:,.2f} $ |")
+        lines.append("")
+
+    if extraction.recurring_obligations:
+        lines.append("## Obligations récurrentes")
+        lines.append("")
+        lines.append("| Bénéficiaire | Montant mensuel | Type |")
+        lines.append("|--------------|-----------------|------|")
+        for ob in extraction.recurring_obligations:
+            lines.append(f"| {ob.payee} | {ob.monthly_amount:,.2f} $ | {ob.category} |")
+        lines.append("")
+        lines.append(f"**Total obligations mensuelles:** {extraction.total_monthly_obligations:,.2f} $")
+        lines.append("")
+
     if extraction.confidence_notes:
         lines.append("## Notes pour le courtier")
         lines.append("")
@@ -57,6 +81,7 @@ def _format_summary(extraction) -> str:
 
 async def analyze_bank_statements(
     documents: list[dict],
+    ctx: Context,
     borrower_name: str | None = None,
     business_name: str | None = None,
     business_type: str | None = None,
@@ -65,6 +90,7 @@ async def analyze_bank_statements(
 
     Args:
         documents: List of dicts with 'data' (base64) and 'mime_type' keys.
+        ctx: MCP Context for progress reporting and logging.
         borrower_name: Optional borrower name for context.
         business_name: Optional business name for context.
         business_type: Optional business type for context.
@@ -73,12 +99,16 @@ async def analyze_bank_statements(
         List containing a TextContent summary and an EmbeddedResource Excel file.
     """
     # 1. Parse and validate documents
+    await ctx.report_progress(progress=0, total=4)
+    await ctx.info(f"Réception de {len(documents)} document(s) à analyser")
     try:
         parsed = parse_documents(documents)
     except DocumentParseError as exc:
         return [TextContent(type="text", text=f"Erreur de document: {exc}")]
 
     # 2. Extract via Vertex AI
+    await ctx.report_progress(progress=1, total=4)
+    await ctx.info("Extraction IA en cours via Vertex AI (Gemini)")
     try:
         extraction = await extract_bank_statements(
             parsed, borrower_name, business_name, business_type
@@ -92,6 +122,8 @@ async def analyze_bank_statements(
         ]
 
     # 3. Generate Excel
+    await ctx.report_progress(progress=2, total=4)
+    await ctx.info("Génération du rapport Excel")
     try:
         excel_b64 = generate_excel_base64(extraction)
     except Exception as exc:
@@ -103,10 +135,14 @@ async def analyze_bank_statements(
         ]
 
     # 4. Build response
+    await ctx.report_progress(progress=3, total=4)
     summary = _format_summary(extraction)
 
     borrower_slug = (borrower_name or "emprunteur").replace(" ", "_").lower()
     filename = f"analyse_revenu_{borrower_slug}.xlsx"
+
+    await ctx.report_progress(progress=4, total=4)
+    await ctx.info(f"Analyse terminée — {extraction.months_covered} mois couverts, revenu annualisé: {extraction.annualized_business_income:,.2f} $")
 
     return [
         TextContent(type="text", text=summary),

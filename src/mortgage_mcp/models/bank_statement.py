@@ -35,6 +35,21 @@ class Withdrawal(BaseModel):
     account: str = Field(default="", description="Source account identifier (e.g. 'Desjardins XX43')")
 
 
+class NSFEvent(BaseModel):
+    date: str = Field(description="Date de l'événement NSF (YYYY-MM-DD)")
+    description: str = Field(description="Description de la transaction")
+    amount: float = Field(description="Montant des frais NSF en CAD")
+    account: str = Field(default="", description="Compte source")
+
+
+class RecurringObligation(BaseModel):
+    payee: str = Field(description="Nom du créancier/bénéficiaire")
+    monthly_amount: float = Field(description="Montant mensuel approximatif en CAD")
+    category: str = Field(description="Type d'obligation: hypotheque, pret_auto, marge_credit, assurance, telecom, pension_alimentaire, autre")
+    frequency: str = Field(default="mensuel", description="Fréquence du paiement")
+    account: str = Field(default="", description="Compte source")
+
+
 class MonthlyBreakdown(BaseModel):
     month: str = Field(description="Month in YYYY-MM format")
     total_deposits: float = Field(description="Sum of all deposits for the month")
@@ -76,6 +91,10 @@ class BankStatementExtraction(BaseModel):
     annualized_business_income: float = Field(
         description="Projected annual business income (average_monthly * 12)"
     )
+    nsf_events: list[NSFEvent] = Field(default_factory=list, description="Événements NSF, découverts et items retournés détectés")
+    nsf_total_fees: float = Field(default=0.0, description="Total des frais NSF/découverts")
+    recurring_obligations: list[RecurringObligation] = Field(default_factory=list, description="Obligations financières récurrentes détectées")
+    total_monthly_obligations: float = Field(default=0.0, description="Total des obligations mensuelles récurrentes")
     confidence_notes: list[str] = Field(
         default_factory=list,
         description="Notes about data quality, assumptions, or flags for broker review",

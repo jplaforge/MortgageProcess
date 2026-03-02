@@ -1,10 +1,13 @@
 """MCP server for self-employed mortgage income analysis."""
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 
 from mortgage_mcp.config import settings
@@ -25,6 +28,13 @@ class BearerTokenVerifier(TokenVerifier):
         return AccessToken(token=token, client_id="mcp-client", scopes=[])
 
 
+@asynccontextmanager
+async def server_lifespan(server: FastMCP) -> AsyncIterator[None]:
+    """Run once at startup: set up GCP credentials."""
+    settings.setup_gcp_credentials()
+    yield
+
+
 _use_auth = bool(settings.mcp_auth_token)
 
 mcp = FastMCP(
@@ -36,6 +46,7 @@ mcp = FastMCP(
     ),
     host="0.0.0.0",
     port=port,
+    lifespan=server_lifespan,
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(RENDER_URL),
         resource_server_url=AnyHttpUrl(RENDER_URL),
@@ -44,9 +55,18 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
+@mcp.tool(
+    title="Analyser les relevés bancaires",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 async def analyze_bank_statements(
     documents: list[dict],
+    ctx: Context,
     borrower_name: str | None = None,
     business_name: str | None = None,
     business_type: str | None = None,
@@ -71,20 +91,26 @@ async def analyze_bank_statements(
         analyze_bank_statements as _analyze,
     )
 
-    return await _analyze(documents, borrower_name, business_name, business_type)
+    return await _analyze(documents, ctx, borrower_name, business_name, business_type)
 
 
-@mcp.tool()
-async def health_check() -> str:
+@mcp.tool(
+    title="Vérifier l'état du serveur",
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+async def health_check(ctx: Context) -> str:
     """Vérifie la connectivité avec Vertex AI et retourne le statut du serveur."""
     from mortgage_mcp.tools.health import health_check as _health_check
 
-    return await _health_check()
+    return await _health_check(ctx)
 
 
 def main() -> None:
-    settings.setup_gcp_credentials()
-
     mcp.run(transport="streamable-http")
 
 

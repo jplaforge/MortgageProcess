@@ -49,6 +49,19 @@ Analyse les relevés bancaires fournis et extrais les informations suivantes de 
    - En cas de doute, GARDE la transaction et signale-la dans `confidence_notes` avec la mention "Doublon potentiel".
    - NE PAS éliminer des transactions provenant de comptes différents, même si elles ont le même montant ou la même date.
 
+9. **Détection NSF / Découverts**: Identifie tous les frais de fonds insuffisants (NSF), découverts, et items retournés dans les retraits. Cherche les descriptions contenant: "NSF", "FONDS INSUFFISANTS", "DÉCOUVERT", "ITEM RETOURNÉ", "PROVISION INSUFFISANTE", "CHÈQUE RETOURNÉ", "FRAIS RETOUR". Pour chaque événement, extrais la date, description, montant des frais et le compte. Calcule le total des frais NSF.
+
+10. **Obligations récurrentes**: Identifie les retraits qui se répètent mensuellement (même bénéficiaire, montant similaire ±5%). Classe-les par type:
+      - `hypotheque`: paiements hypothécaires ou loyer
+      - `pret_auto`: prêt automobile
+      - `marge_credit`: marge de crédit, carte de crédit (paiement minimum récurrent)
+      - `assurance`: primes d'assurance
+      - `telecom`: téléphone, internet, câble
+      - `pension_alimentaire`: pension alimentaire, soutien aux enfants
+      - `autre`: autre obligation récurrente
+      Calcule le total mensuel de toutes les obligations récurrentes identifiées.
+      Note: une obligation récurrente doit apparaître au moins 2 fois sur la période analysée.
+
 8. **Notes de confiance**: Signale tout élément nécessitant une vérification par le courtier:
    - Dépôts inhabituellement élevés
    - Revenus irréguliers

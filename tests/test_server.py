@@ -8,6 +8,16 @@ import pytest
 from mortgage_mcp.server import mcp
 
 
+@pytest.fixture
+def mock_ctx():
+    """A mock MCP Context with async logging and progress methods."""
+    ctx = AsyncMock()
+    ctx.info = AsyncMock()
+    ctx.warning = AsyncMock()
+    ctx.report_progress = AsyncMock()
+    return ctx
+
+
 class TestServerToolRegistration:
     def test_tools_registered(self):
         """Verify both tools are registered on the MCP server."""
@@ -29,30 +39,32 @@ class TestServerToolRegistration:
 
 class TestAnalyzeBankStatementsTool:
     @pytest.mark.asyncio
-    async def test_invalid_document_returns_error(self):
+    async def test_invalid_document_returns_error(self, mock_ctx):
         """Calling with bad documents should return an error message, not raise."""
         from mortgage_mcp.tools.analyze_bank_statements import analyze_bank_statements
 
         result = await analyze_bank_statements(
-            documents=[{"data": "bad-base64!!!", "mime_type": "application/pdf"}]
+            documents=[{"data": "bad-base64!!!", "mime_type": "application/pdf"}],
+            ctx=mock_ctx,
         )
         assert len(result) == 1
         assert "Erreur" in result[0].text
 
     @pytest.mark.asyncio
-    async def test_unsupported_mime_returns_error(self):
+    async def test_unsupported_mime_returns_error(self, mock_ctx):
         from mortgage_mcp.tools.analyze_bank_statements import analyze_bank_statements
 
         result = await analyze_bank_statements(
             documents=[
                 {"data": base64.b64encode(b"data").decode(), "mime_type": "application/zip"}
-            ]
+            ],
+            ctx=mock_ctx,
         )
         assert len(result) == 1
         assert "Erreur" in result[0].text
 
     @pytest.mark.asyncio
-    async def test_successful_analysis_with_mock(self, sample_extraction):
+    async def test_successful_analysis_with_mock(self, sample_extraction, mock_ctx):
         """With mocked Vertex AI, should return summary + Excel."""
         from mortgage_mcp.tools.analyze_bank_statements import analyze_bank_statements
 
@@ -65,6 +77,7 @@ class TestAnalyzeBankStatementsTool:
         ):
             result = await analyze_bank_statements(
                 documents=[{"data": pdf_b64, "mime_type": "application/pdf"}],
+                ctx=mock_ctx,
                 borrower_name="Jean Tremblay",
             )
 

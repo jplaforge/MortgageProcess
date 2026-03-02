@@ -46,6 +46,7 @@ def generate_excel(extraction: BankStatementExtraction) -> bytes:
     _fill_resume(wb, extraction)
     _fill_monthly(wb, extraction)
     _fill_deposits(wb, extraction)
+    _fill_withdrawals(wb, extraction)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -67,6 +68,7 @@ def _create_workbook_from_scratch():
     ws_resume.title = "Resume"
     wb.create_sheet("Detail mensuel")
     wb.create_sheet("Depots")
+    wb.create_sheet("Retraits")
     return wb
 
 
@@ -80,51 +82,88 @@ def _fill_resume(wb, extraction: BankStatementExtraction) -> None:
             cell.value = None
 
     info = extraction.account_info
+    current_row = 1
 
     # Title
-    ws["A1"] = "Grille d'analyse — Revenu de travailleur autonome"
-    ws["A1"].font = Font(bold=True, size=14)
+    ws.cell(row=current_row, column=1, value="Grille d'analyse — Revenu de travailleur autonome").font = Font(bold=True, size=14)
+    current_row += 2  # skip a blank row
 
     # Borrower info
-    labels = [
-        ("A3", "Titulaire du compte:", "B3", info.account_holder),
-        ("A4", "Institution financière:", "B4", info.institution),
-        ("A5", "Numéro de compte:", "B5", f"***{info.account_number_last4}" if info.account_number_last4 else "N/D"),
-        ("A6", "Période analysée:", "B6", f"{info.statement_period_start} au {info.statement_period_end}"),
-        ("A7", "Nombre de mois:", "B7", extraction.months_covered),
+    borrower_data = [
+        ("Titulaire du compte:", info.account_holder),
+        ("Institution financière:", info.institution),
+        ("Numéro de compte:", f"***{info.account_number_last4}" if info.account_number_last4 else "N/D"),
+        ("Période analysée:", f"{info.statement_period_start} au {info.statement_period_end}"),
+        ("Nombre de mois:", extraction.months_covered),
     ]
-    for label_cell, label, value_cell, value in labels:
-        ws[label_cell] = label
-        ws[label_cell].font = HEADER_FONT
-        ws[value_cell] = value
+    for label, value in borrower_data:
+        ws.cell(row=current_row, column=1, value=label).font = HEADER_FONT
+        ws.cell(row=current_row, column=2, value=value)
+        current_row += 1
+    current_row += 1  # blank row
 
     # Financial summary
-    ws["A9"] = "Sommaire financier"
-    ws["A9"].font = Font(bold=True, size=12)
+    ws.cell(row=current_row, column=1, value="Sommaire financier").font = Font(bold=True, size=12)
+    current_row += 1
 
-    fin_labels = [
-        ("A10", "Dépôts totaux:", "B10", extraction.total_deposits),
-        ("A11", "Revenu d'affaires total:", "B11", extraction.total_business_income),
-        ("A12", "Retraits totaux:", "B12", extraction.total_withdrawals),
-        ("A13", "Revenu mensuel moyen (affaires):", "B13", extraction.average_monthly_business_income),
-        ("A14", "Revenu annualisé (affaires):", "B14", extraction.annualized_business_income),
+    fin_data = [
+        ("Dépôts totaux:", extraction.total_deposits),
+        ("Revenu d'affaires total:", extraction.total_business_income),
+        ("Retraits totaux:", extraction.total_withdrawals),
+        ("Revenu mensuel moyen (affaires):", extraction.average_monthly_business_income),
+        ("Revenu annualisé (affaires):", extraction.annualized_business_income),
     ]
-    for label_cell, label, value_cell, value in fin_labels:
-        ws[label_cell] = label
-        ws[label_cell].font = HEADER_FONT
-        ws[value_cell] = value
-        ws[value_cell].number_format = CURRENCY_FORMAT
+    for label, value in fin_data:
+        ws.cell(row=current_row, column=1, value=label).font = HEADER_FONT
+        cell = ws.cell(row=current_row, column=2, value=value)
+        cell.number_format = CURRENCY_FORMAT
+        current_row += 1
+    current_row += 1  # blank row
+
+    # Risk indicators (NSF)
+    if extraction.nsf_events:
+        ws.cell(row=current_row, column=1, value="Indicateurs de risque").font = Font(bold=True, size=12)
+        current_row += 1
+        ws.cell(row=current_row, column=1, value="Événements NSF/découverts:").font = HEADER_FONT
+        ws.cell(row=current_row, column=2, value=len(extraction.nsf_events))
+        current_row += 1
+        ws.cell(row=current_row, column=1, value="Frais NSF totaux:").font = HEADER_FONT
+        ws.cell(row=current_row, column=2, value=extraction.nsf_total_fees).number_format = CURRENCY_FORMAT
+        current_row += 2  # blank row
+
+    # Recurring obligations
+    if extraction.recurring_obligations:
+        ws.cell(row=current_row, column=1, value="Obligations récurrentes détectées").font = Font(bold=True, size=12)
+        current_row += 1
+        # Mini table headers
+        for col, header in enumerate(["Bénéficiaire", "Montant mensuel", "Type"], 1):
+            cell = ws.cell(row=current_row, column=col, value=header)
+            cell.font = HEADER_FONT
+            cell.border = THIN_BORDER
+        current_row += 1
+        for obligation in extraction.recurring_obligations:
+            ws.cell(row=current_row, column=1, value=obligation.payee).border = THIN_BORDER
+            cell_amt = ws.cell(row=current_row, column=2, value=obligation.monthly_amount)
+            cell_amt.number_format = CURRENCY_FORMAT
+            cell_amt.border = THIN_BORDER
+            ws.cell(row=current_row, column=3, value=obligation.category).border = THIN_BORDER
+            current_row += 1
+        ws.cell(row=current_row, column=1, value="Total obligations mensuelles:").font = HEADER_FONT
+        ws.cell(row=current_row, column=2, value=extraction.total_monthly_obligations).number_format = CURRENCY_FORMAT
+        current_row += 2  # blank row
 
     # Confidence notes
     if extraction.confidence_notes:
-        ws["A16"] = "Notes et observations"
-        ws["A16"].font = Font(bold=True, size=12)
-        for i, note in enumerate(extraction.confidence_notes):
-            ws[f"A{17 + i}"] = f"• {note}"
+        ws.cell(row=current_row, column=1, value="Notes et observations").font = Font(bold=True, size=12)
+        current_row += 1
+        for note in extraction.confidence_notes:
+            ws.cell(row=current_row, column=1, value=f"• {note}")
+            current_row += 1
 
     # Column widths
     ws.column_dimensions["A"].width = 35
     ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 20
 
 
 def _fill_monthly(wb, extraction: BankStatementExtraction) -> None:
@@ -227,6 +266,42 @@ def _fill_deposits(wb, extraction: BankStatementExtraction) -> None:
             cell_amt.number_format = CURRENCY_FORMAT
             cell_amt.border = THIN_BORDER
             ws.cell(row=row_num, column=5, value=dep.category.value).border = THIN_BORDER
+            row_num += 1
+
+    # Column widths
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["D"].width = 16
+    ws.column_dimensions["E"].width = 20
+
+
+def _fill_withdrawals(wb, extraction: BankStatementExtraction) -> None:
+    """Fill the Retraits (all withdrawals) sheet."""
+    if "Retraits" not in wb.sheetnames:
+        wb.create_sheet("Retraits")
+    ws = wb["Retraits"]
+
+    # Clear
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+        for cell in row:
+            cell.value = None
+
+    headers = ["Date", "Compte", "Description", "Montant", "Catégorie"]
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=header)
+    _apply_header_style(ws, 1, len(headers))
+
+    row_num = 2
+    for month in extraction.monthly_breakdown:
+        for wd in month.withdrawals:
+            ws.cell(row=row_num, column=1, value=wd.date).border = THIN_BORDER
+            ws.cell(row=row_num, column=2, value=wd.account).border = THIN_BORDER
+            ws.cell(row=row_num, column=3, value=wd.description).border = THIN_BORDER
+            cell_amt = ws.cell(row=row_num, column=4, value=wd.amount)
+            cell_amt.number_format = CURRENCY_FORMAT
+            cell_amt.border = THIN_BORDER
+            ws.cell(row=row_num, column=5, value=wd.category).border = THIN_BORDER
             row_num += 1
 
     # Column widths

@@ -2,8 +2,13 @@
 
 import io
 
+import pytest
 from openpyxl import load_workbook
 
+from mortgage_mcp.models.bank_statement import (
+    NSFEvent,
+    RecurringObligation,
+)
 from mortgage_mcp.services.excel_generator import generate_excel, generate_excel_base64
 
 
@@ -19,6 +24,7 @@ class TestGenerateExcel:
         assert "Resume" in wb.sheetnames
         assert "Detail mensuel" in wb.sheetnames
         assert "Depots" in wb.sheetnames
+        assert "Retraits" in wb.sheetnames
 
     def test_resume_sheet_content(self, sample_extraction):
         data = generate_excel(sample_extraction)
@@ -72,6 +78,83 @@ class TestGenerateExcel:
         )
         # Check last deposit row has data
         assert ws.cell(row=total_deposits + 1, column=1).value is not None
+
+    def test_withdrawals_sheet_rows(self, sample_extraction):
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Retraits"]
+
+        # Header
+        assert ws.cell(row=1, column=1).value == "Date"
+        assert ws.cell(row=1, column=3).value == "Description"
+        assert ws.cell(row=1, column=4).value == "Montant"
+
+        # Total withdrawals across all months: 1 (Jan) + 2 (Feb) + 2 (Mar) = 5
+        total_withdrawals = sum(
+            len(m.withdrawals) for m in sample_extraction.monthly_breakdown
+        )
+        assert total_withdrawals == 5
+        # First withdrawal row
+        assert ws.cell(row=2, column=1).value == "2025-01-10"
+        assert ws.cell(row=2, column=3).value == "LOYER BUREAU"
+        assert ws.cell(row=2, column=4).value == 1500.00
+        # Last withdrawal row should have data
+        assert ws.cell(row=total_withdrawals + 1, column=1).value is not None
+
+    def test_resume_with_nsf(self, sample_extraction):
+        """Resume sheet includes risk indicators when NSF events exist."""
+        sample_extraction.nsf_events = [
+            NSFEvent(date="2025-01-15", description="NSF CHEQUE 1234", amount=45.00),
+            NSFEvent(date="2025-02-20", description="FONDS INSUFFISANTS", amount=45.00),
+        ]
+        sample_extraction.nsf_total_fees = 90.00
+
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Resume"]
+
+        # Find the risk indicators section
+        found_risk = False
+        for row in ws.iter_rows(min_col=1, max_col=1):
+            if row[0].value == "Indicateurs de risque":
+                found_risk = True
+                risk_row = row[0].row
+                # Next row should show count
+                assert ws.cell(row=risk_row + 1, column=2).value == 2
+                # Row after that should show total fees
+                assert ws.cell(row=risk_row + 2, column=2).value == 90.00
+                break
+        assert found_risk, "Risk indicators section not found"
+
+    def test_resume_with_obligations(self, sample_extraction):
+        """Resume sheet includes recurring obligations when they exist."""
+        sample_extraction.recurring_obligations = [
+            RecurringObligation(payee="Banque Nationale", monthly_amount=1200.00, category="hypotheque"),
+            RecurringObligation(payee="Bell Mobilité", monthly_amount=85.00, category="telecom"),
+        ]
+        sample_extraction.total_monthly_obligations = 1285.00
+
+        data = generate_excel(sample_extraction)
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb["Resume"]
+
+        # Find the obligations section
+        found_obligations = False
+        for row in ws.iter_rows(min_col=1, max_col=1):
+            if row[0].value == "Obligations récurrentes détectées":
+                found_obligations = True
+                section_row = row[0].row
+                # Header row
+                assert ws.cell(row=section_row + 1, column=1).value == "Bénéficiaire"
+                # First obligation
+                assert ws.cell(row=section_row + 2, column=1).value == "Banque Nationale"
+                assert ws.cell(row=section_row + 2, column=2).value == 1200.00
+                # Second obligation
+                assert ws.cell(row=section_row + 3, column=1).value == "Bell Mobilité"
+                # Total row
+                assert ws.cell(row=section_row + 4, column=2).value == 1285.00
+                break
+        assert found_obligations, "Obligations section not found"
 
     def test_base64_output(self, sample_extraction):
         result = generate_excel_base64(sample_extraction)
